@@ -532,26 +532,6 @@ The listener stays attached after the connect settles, and from then on logs eac
 warning, `[Redis] <message>` with `provider: "redis"`, so a dropped socket and the reconnects after
 it stay visible in the server log. The message only, for the same reason as above.
 
-### 4.5 Cluster-mode replicas (#2031)
-
-A Cluster-mode config endpoint (ElastiCache for Redis OSS, MemoryDB) resolves to any node of the
-shard, and by default a replica refuses every command with a `MOVED` redirect even for its own
-shard's data. `redisOptions()` sets ioredis's OWN `readOnly: true` option - unrelated to this
-connection's own `readOnly` field, which means something stronger (refuse every write app-side) and
-which Redis does not accept (`READ_ONLY_ENFORCED.redis === false`). ioredis's option sends the Redis
-command `READONLY` on every `ready` event, the first connect AND every reconnect, swallowing a
-refusal itself - which is why it is used instead of one `READONLY` call after `connect()`: a one-shot
-call would be lost the moment a socket drops and ioredis reconnects, silently reverting to `MOVED`
-on the very event (a cluster failover) this exists for. On a Cluster node it lets a replica serve
-reads directly; on a plain server `READONLY` is refused and swallowed; a PRIMARY ignores it, since the
-flag only changes whether a replica serves a read locally instead of redirecting. A write that then
-lands on a read-only connection answers the server's own `READONLY You can't write against a read
-only replica.`, already mapped to the `privilege` refusal class ([§10](#10-error-handling)).
-
-This is the single-node case a one-shard cluster's config endpoint produces, not cluster-aware
-routing: the connection is still one plain `ioredis.Redis`, so a multi-shard cluster still redirects a
-command for a key outside the node reached ([§6.4](#64-known-limitation-clustered-deployments)).
-
 ### Connection string
 
 The scheme shown for Redis is `redis://`, and the parser also accepts `rediss://`.
@@ -2126,10 +2106,7 @@ request/response contract.
   in a `rediss://` URL says whose certificate to trust - and the ordinary self-hosted `--tls-port`
   node presents a self-signed one, which a verifying mode would refuse. Verification therefore stays
   an explicit choice in the SSL panel; the URL alone never turns it on.
-- **No multi-shard Cluster routing, and no Sentinel support.** The provider still opens one plain
-  connection, never `ioredis.Cluster`: on a cluster spanning several shards a command for a key
-  outside that node's slots is still redirected (`MOVED`). What it DOES handle is the one-shard case
-  a cluster-mode config endpoint resolves to - see [§4.5](#45-cluster-mode-replicas-2031).
+- **No Cluster / Sentinel support.** Only a single standalone node is supported.
 - **No pub/sub, `MONITOR` or blocking reads in the editor.** Each would change or hold the one client every request on the connection shares, so `query()` refuses them ([§5.2b](#52b-commands-that-would-change-the-shared-connection-1107)).
 - **`SCAN` is capped at 1000 keys** for schema discovery — prefixes that only appear beyond the cap
   won't show as "tables". This is a deliberate bound, not a bug. The object surface shares the same
