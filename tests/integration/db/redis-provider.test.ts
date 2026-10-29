@@ -474,6 +474,12 @@ const openedDatabases = (): number[] => openedClients.map((client) => client.dat
 let infoRefusal: string | null = null;
 
 /**
+ * When set, `READONLY` rejects with this message instead of answering `OK` — the shape a
+ * non-cluster server answers it with (#2031).
+ */
+let readonlyRefusal: string | null = null;
+
+/**
  * How the next pipelined `TYPE` batch answers.
  *
  * `error` is one command the connection could not complete and `null` is a pipeline that answered
@@ -566,6 +572,12 @@ mock.module("ioredis", () => {
         throw new Error("Connection is closed.");
       }
       this._state.database = this._db;
+      // The real driver's `ready` handler: with the `readOnly` option set, it sends `READONLY`
+      // on every successful (re)connect and swallows a refusal itself (#2031).
+      const options = (this._config ?? {}) as Record<string, unknown>;
+      if (options.readOnly === true) {
+        await this.answer("READONLY").catch(() => {});
+      }
     }
 
     disconnect() {
@@ -729,6 +741,10 @@ mock.module("ioredis", () => {
       // A server's `SELECT` moves THIS connection, the same as the method form above, so a
       // provider that let it through `query()` would move the session here too (#1107).
       if (cmd === "SELECT" && !this._inMulti) return this.select(Number(args[0]));
+      if (cmd === "READONLY") {
+        if (readonlyRefusal !== null) throw new Error(readonlyRefusal);
+        return "OK";
+      }
       if (cmd === "PING" && pingFailure !== null) throw pingFailure;
       // Inside a `MULTI` the server answers the status "QUEUED" INSTEAD of the command's
       // own reply and runs nothing, every command alike except the ones above. Measured on
@@ -832,6 +848,30 @@ describe("RedisProvider", () => {
       await provider.connect();
       await provider.disconnect();
       expect(provider.isConnected()).toBe(false);
+    });
+
+    test("sends READONLY after connecting, so a cluster replica serves reads instead of redirecting them (#2031)", async () => {
+      capturedCalls.length = 0;
+      await provider.connect();
+      expect(capturedCalls).toEqual(expect.arrayContaining([{ command: "READONLY", args: [] }]));
+    });
+
+    test("a non-cluster server's refusal of READONLY does not fail the connect (#2031)", async () => {
+      readonlyRefusal = "ERR This instance has cluster support disabled";
+      try {
+        await provider.connect();
+        expect(provider.isConnected()).toBe(true);
+      } finally {
+        readonlyRefusal = null;
+      }
+    });
+
+    // `readOnly` is ioredis's OWN option (#2031): unlike a one-shot call after `connect()`, the
+    // driver resends `READONLY` on every `ready` event, so a reconnect after a dropped socket or
+    // an actual cluster failover keeps the connection read-only instead of silently reverting.
+    test("asks ioredis for the readOnly option, so READONLY survives a reconnect (#2031)", async () => {
+      await provider.connect();
+      expect(capturedRedisOptions[capturedRedisOptions.length - 1]).toMatchObject({ readOnly: true });
     });
 
     /*
@@ -3728,6 +3768,7 @@ describe("RedisProvider", () => {
         // reply can hold more than one library and the selection is a byte comparison of
         // `library_name`. The fixture's coexisting `libredb_probe` and `LIBREDB_PROBE` are the proof.
         mockCall = async () => [LIBRARY_UPPER, LIBRARY_LOWER];
+        capturedCalls.length = 0;
         const build = await provider.buildObjectEdit!(request(EDITED));
         if (!build.built) throw new Error(build.refusal.sentence);
         expect(build.preimage.text).toBe(LIBRARY_LOWER.library_code);
@@ -4022,6 +4063,7 @@ describe("RedisProvider", () => {
           ],
         });
         mockCall = async () => [LIBRARY_LOWER];
+        capturedCalls.length = 0;
 
         const build = await provider.buildObjectEdit!(request(EDITED, ["main", "3", LOWER_NAME]));
         if (!build.built) throw new Error(build.refusal.sentence);

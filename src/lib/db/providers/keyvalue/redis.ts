@@ -1372,6 +1372,10 @@ export class RedisProvider extends BaseDatabaseProvider {
       password: this.config.password || undefined,
       connectTimeout: this.queryTimeout,
       lazyConnect: true,
+      // A Cluster-mode replica answers every command with a MOVED redirect unless told this.
+      // A non-cluster server refuses the command itself and a primary ignores it.
+      // It only changes whether a REPLICA serves a read locally instead of redirecting.
+      readOnly: true,
       // An integer reply as its digits rather than a JS number. Measured on redis 8.10.2
       // through ioredis 5.11.1: `INCR` on 9223372036854775806 was shown as
       // `(integer) 9223372036854778000` without this, a counter rounded with no error. The
