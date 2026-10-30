@@ -532,6 +532,17 @@ The listener stays attached after the connect settles, and from then on logs eac
 warning, `[Redis] <message>` with `provider: "redis"`, so a dropped socket and the reconnects after
 it stay visible in the server log. The message only, for the same reason as above.
 
+### 4.5 Cluster-mode replicas (#2031)
+
+The provider sets ioredis's `readOnly` option, so a replica serves reads instead of answering `MOVED`.
+Measured 2026-10-30 on redis 8.2.11, ioredis 5.11.1:
+
+- `READONLY` is sent on every connect and reconnect.
+- A plain server's refusal does not fail the connect.
+- Writes on a replica still get `MOVED`.
+- Keys outside the reached node's slots still get `MOVED`.
+- Replica reads may lag (not measured; [source](https://redis.io/docs/latest/commands/readonly/)).
+
 ### Connection string
 
 The scheme shown for Redis is `redis://`, and the parser also accepts `rediss://`.
@@ -702,6 +713,7 @@ The refusal reads `<COMMAND> is not run here: it would change the shared connect
 | `RESET` | Moved the client to database 0 AND logged it back in as `default`: the read-only user could `SET` |
 | `AUTH default <anything>` | The same against a stock `default nopass` server |
 | `HELLO 3` | Switched the reply protocol; ioredis then failed with `Protocol error, got "%"` |
+| `READWRITE` | Cleared `READONLY` ([§4.5](#45-cluster-mode-replicas-2031)): later replica reads answered `MOVED` (redis 8.2.11, 2026-10-30) |
 
 **Commands after which the connection stops answering.**
 The refusal reads `<COMMAND> is not run here: the shared connection would stop answering later requests.`
@@ -2106,7 +2118,8 @@ request/response contract.
   in a `rediss://` URL says whose certificate to trust - and the ordinary self-hosted `--tls-port`
   node presents a self-signed one, which a verifying mode would refuse. Verification therefore stays
   an explicit choice in the SSL panel; the URL alone never turns it on.
-- **No Cluster / Sentinel support.** Only a single standalone node is supported.
+- **No cluster-aware routing, and no Sentinel support.** Replica reads work; `MOVED` is not followed
+  ([§4.5](#45-cluster-mode-replicas-2031)).
 - **No pub/sub, `MONITOR` or blocking reads in the editor.** Each would change or hold the one client every request on the connection shares, so `query()` refuses them ([§5.2b](#52b-commands-that-would-change-the-shared-connection-1107)).
 - **`SCAN` is capped at 1000 keys** for schema discovery — prefixes that only appear beyond the cap
   won't show as "tables". This is a deliberate bound, not a bug. The object surface shares the same

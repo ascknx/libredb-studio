@@ -1547,6 +1547,8 @@ describe("RedisProvider", () => {
         "RESET",
         "AUTH default x",
         "HELLO 3",
+        "READWRITE",
+        '{"command":"readwrite"}',
         "QUIT",
         "SUBSCRIBE news",
         "PSUBSCRIBE news:*",
