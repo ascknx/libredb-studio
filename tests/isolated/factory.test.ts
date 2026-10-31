@@ -61,6 +61,10 @@ import { removeOwnerProviders } from "@/lib/db/owner-removal";
 import { logger } from "@/lib/logger";
 import { encryptSecret } from "@/lib/storage/encryption";
 import type { SSHTunnelConfig } from "@/lib/types";
+import { CassandraTransportError } from "@/lib/db/providers/sql/cassandra/transport";
+import { CouchbaseError } from "@/lib/db/providers/document/couchbase/transport";
+import { DruidTransportError } from "@/lib/db/providers/sql/druid/transport";
+import { NEO4J_FIXTURES, recordedGraphClient } from "../helpers/neo4j-fixtures";
 
 // The SQLite agent-profile tests below construct the read-only profile for its
 // query_only boundary, not to exercise the child transport. The worker's node:sqlite
@@ -618,6 +622,214 @@ describe("createDatabaseProvider", () => {
     expect(provider.type).toBe("clickhouse");
   });
 
+  test("the execution context rides along to elasticsearch: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("elasticsearch", { port: 9200 });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A transport in place of a connection, answering one row, so only the context tells the two apart.
+    const sent: string[] = [];
+    const transport = {
+      queryBounded: async (sql: string) => {
+        sent.push(sql);
+        return { rows: [{ x: 1 }], fieldNames: ["x"], columnTypes: null, totalHits: null };
+      },
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { transport, ensureConnected: () => undefined });
+    }
+    await expect(editor.queryReadOnly("SELECT 1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent).toEqual(["SELECT 1"]);
+  });
+
+  test("the execution context rides along to opensearch: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("opensearch", { port: 9200 });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A transport in place of a connection, answering one row, so only the context tells the two apart. OpenSearch
+    // reads its result limit before each agent statement, so the fake answers that read too.
+    const sent: string[] = [];
+    const transport = {
+      sqlResultLimit: async () => ({ setting: "plugins.query.size_limit", rows: 10_000 }),
+      queryBounded: async (sql: string) => {
+        sent.push(sql);
+        return { rows: [{ x: 1 }], fieldNames: ["x"], columnTypes: null, totalHits: null };
+      },
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { transport, ensureConnected: () => undefined });
+    }
+    await expect(editor.queryReadOnly("SELECT 1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent).toEqual(["SELECT 1"]);
+  });
+
+  test("the execution context rides along to db2: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("db2", { port: 50000, database: "TESTDB", allowInsecureAuth: true });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A driver whose connect fails in place of db2-node, so only the context tells the two apart: the editor handle
+    // is refused before it opens anything, and the profiled one goes on to open the agent call's own connection.
+    const opened: string[] = [];
+    const driver = {
+      Client: class {
+        constructor(options: { user: string }) {
+          opened.push(options.user);
+        }
+        async connect() {
+          throw new Error("no server here");
+        }
+      },
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { loadDriver: async () => driver, ensureConnected: () => undefined });
+    }
+    await expect(editor.queryReadOnly("SELECT 1 FROM SYSIBM.SYSDUMMY1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(opened).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1 FROM SYSIBM.SYSDUMMY1", AGENT_BUDGET)).rejects.toThrow(
+      "Failed to connect to Db2: no server here",
+    );
+    expect(opened).toEqual(["test"]);
+  });
+
+  test("the execution context rides along to cassandra: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("cassandra", {
+      port: 9042,
+      database: "probe",
+      localDataCenter: "datacenter1",
+      user: "agent_ro",
+      password: "not-a-real-password",
+    });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A session of its own per agent call, answering the role check as a SELECT-only role and the statement with one
+    // row, so only the context tells the two apart.
+    const sent: string[] = [];
+    const answers: Record<string, { rows: Record<string, unknown>[]; fieldNames: string[] | null }> = {
+      "SELECT release_version FROM system.local": {
+        rows: [{ release_version: "5.0.9" }],
+        fieldNames: ["release_version"],
+      },
+      "LIST ROLES OF 'agent_ro'": { rows: [{ role: "agent_ro", super: false }], fieldNames: ["role", "super"] },
+      "LIST ALL PERMISSIONS OF 'agent_ro'": {
+        rows: [{ role: "agent_ro", resource: "<keyspace probe>", permission: "SELECT" }],
+        fieldNames: ["role", "resource", "permission"],
+      },
+      "SELECT 1": { rows: [{ x: 1 }], fieldNames: ["x"] },
+    };
+    const openAgentTransport = () => ({
+      kind: "native" as const,
+      connect: async () => {},
+      close: async () => {},
+      execute: async (cql: string) => {
+        sent.push(cql);
+        if (cql === "SELECT key FROM system.versions") {
+          throw new CassandraTransportError("table versions does not exist", "invalid", 8704);
+        }
+        if (cql.startsWith("DROP TABLE IF EXISTS")) throw new CassandraTransportError("no DROP", "permission", 8448);
+        const answer = answers[cql] ?? { rows: [], fieldNames: null };
+        return { ...answer, columnTypes: null, pageState: null };
+      },
+    });
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { openAgentTransport, ensureConnected: () => undefined, transport: {} });
+    }
+    await expect(editor.queryReadOnly("SELECT 1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent.at(-1)).toBe("SELECT 1");
+  });
+
+  test("the execution context rides along to couchbase: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("couchbase", {
+      port: 8091,
+      database: "probe",
+      user: "agent_ro",
+      password: "not-a-real-password",
+    });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A transport answering the check as a query_select-only user and the statement with one row, so only the context
+    // tells the two apart.
+    const sent: string[] = [];
+    const transport = {
+      whoami: async () => {
+        sent.push("GET /whoami");
+        return {
+          id: "agent_ro",
+          roles: [{ role: "query_select", bucket_name: "probe", scope_name: "_default", collection_name: "*" }],
+        };
+      },
+      agentQuery: async (statement: string) => {
+        sent.push(statement);
+        if (statement.startsWith("DELETE")) throw new CouchbaseError("no query_delete", 13014);
+        return { rows: [{ x: 1 }], fieldNames: ["x"], executionTimeMs: 1, mutationCount: 0, warnings: [] };
+      },
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { ensureConnected: () => undefined, transport });
+    }
+    await expect(editor.queryReadOnly("SELECT 1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent.at(-1)).toBe("SELECT 1");
+  });
+
+  test("the execution context rides along to druid: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("druid", { port: 8888 });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A transport answering the engine probe with the native engine's refusal and the statement with one row, so only
+    // the context tells the two apart.
+    const sent: string[] = [];
+    const transport = {
+      agentQuery: async (statement: string) => {
+        sent.push(statement);
+        if (statement.startsWith("INSERT")) {
+          throw new DruidTransportError(
+            "INSERT operations are not supported by requested SQL engine [native], consider using MSQ.",
+            "INVALID_INPUT",
+          );
+        }
+        return {
+          rows: [{ x: 1 }],
+          fieldNames: ["x"],
+          sqlTypes: {},
+          nativeTypes: {},
+          executionTimeMs: 1,
+          unavailableSegments: null,
+        };
+      },
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { ensureConnected: () => undefined, transport });
+    }
+    await expect(editor.queryReadOnly("SELECT 1", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent.at(-1)).toBe("SELECT 1");
+  });
+
   test("the execution context rides along to clickhouse: queryReadOnly answers only under the agent profile", async () => {
     const conn = makeConnection("clickhouse", { port: 8123, database: "demo" });
     const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
@@ -717,6 +929,138 @@ describe("createDatabaseProvider", () => {
     expect(sent).toEqual([]);
     await expect(profiled.queryReadOnly("SELECT 1", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
     expect(sent).toEqual(["SELECT 1"]);
+  });
+
+  test("the execution context rides along to weaviate: a keyless agent open is refused before any request", async () => {
+    // Port 1 on loopback answers nothing, so an open that dialled would fail as unreachable, not as this refusal.
+    const conn = makeConnection("weaviate", { host: "127.0.0.1", port: 1, user: "", password: "" });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const error = await profiled.connect().then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
+    const operations = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: false });
+    await expect(operations.connect()).rejects.not.toBeInstanceOf(ExecutionProfileError);
+  });
+
+  test("the execution context rides along to qdrant: a keyless agent open is refused before any request", async () => {
+    // Port 1 on loopback answers nothing, so an open that dialled would fail as unreachable, not as this refusal.
+    const conn = makeConnection("qdrant", { host: "127.0.0.1", port: 1, user: "", password: "" });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const error = await profiled.connect().then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
+    const operations = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: false });
+    await expect(operations.connect()).rejects.not.toBeInstanceOf(ExecutionProfileError);
+  });
+
+  test("the execution context rides along to milvus: an agent open that names no user is refused before any request", async () => {
+    // Port 1 on loopback answers nothing, so an open that dialled would fail as unreachable, not as this refusal.
+    const conn = makeConnection("milvus", { host: "127.0.0.1", port: 1, user: "", password: "" });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const error = await profiled.connect().then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
+    const operations = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: false });
+    await expect(operations.connect()).rejects.not.toBeInstanceOf(ExecutionProfileError);
+  });
+
+  test("the execution context rides along to neo4j: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("neo4j", {
+      port: 17687,
+      user: "agent",
+      password: "not-a-real-password",
+      database: "neo4j",
+    });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A session in place of a connect, whose client answers the agent principal's proof from its captures, so only the
+    // context tells the two apart.
+    const recorded = recordedGraphClient(join(NEO4J_FIXTURES, "agent-boundary", "agent"));
+    const read = "MATCH (n:Person) RETURN n.name AS name ORDER BY name";
+    const client = {
+      ...recorded,
+      run: (statement: string, options: Parameters<typeof recorded.run>[1]) =>
+        statement === `EXPLAIN ${read}`
+          ? Promise.resolve({ fields: ["name"], rows: [], truncated: false, queryType: "r" as const })
+          : recorded.run(statement, options),
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, { session: { client, database: "neo4j" }, ensureConnected: () => undefined });
+    }
+    await expect(editor.queryReadOnly(read, AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(recorded.calls).toEqual([]);
+    await expect(profiled.queryReadOnly(read, AGENT_BUDGET)).resolves.toMatchObject({
+      rows: [{ name: "Ada" }, { name: "Bob" }],
+    });
+    expect(recorded.calls.at(-1)?.statement).toBe(read);
+  });
+
+  test("the execution context rides along to influxdb: queryReadOnly answers only under the agent profile", async () => {
+    const conn = makeConnection("influxdb", { port: 18086, user: "", password: "not-a-real-token", database: "home" });
+    const profiled = await createDatabaseProvider(conn, {}, { readOnly: true, sendsStatements: true });
+    const editor = await createDatabaseProvider(conn);
+    if (profiled.queryReadOnly === undefined || editor.queryReadOnly === undefined) throw new Error("no queryReadOnly");
+    // A session in place of a connect, whose client answers a 2.x read-only token's proof and then one row, so only
+    // the context tells the two apart.
+    const sent: string[] = [];
+    const listing =
+      '{"results":[{"statement_id":0,"series":[{"name":"databases","columns":["name"],"values":[["home"]]}]}]}';
+    const client = {
+      send: async (request: { values: { q: string } }) => {
+        sent.push(request.values.q);
+        if (request.values.q === "SHOW DATABASES") return { status: 200, contentType: null, text: listing };
+        if (request.values.q.startsWith("DELETE")) {
+          return {
+            status: 200,
+            contentType: null,
+            text: '{"results":[{"statement_id":0,"error":"insufficient permissions"}]}',
+          };
+        }
+        return {
+          status: 200,
+          contentType: null,
+          text: '{"results":[{"statement_id":0,"series":[{"name":"m","columns":["x"],"values":[[1]]}]}]}',
+        };
+      },
+      close: () => undefined,
+    };
+    for (const provider of [profiled, editor]) {
+      Object.assign(provider, {
+        session: {
+          client,
+          options: {
+            surfaceTimeoutMs: 1_000,
+            callTimeoutMs: 1_000,
+            endpoint: {},
+            secretForms: [],
+            headers: {},
+            database: "home",
+          },
+          version: { generation: "v2", reported: "2.9.1", build: null },
+          visible: ["home"],
+          visibleCut: false,
+        },
+        ensureConnected: () => undefined,
+      });
+    }
+    await expect(editor.queryReadOnly("SELECT x FROM m", AGENT_BUDGET)).rejects.toThrow(
+      "Read-only execution requires a provider opened under the agent read-only profile",
+    );
+    expect(sent).toEqual([]);
+    await expect(profiled.queryReadOnly("SELECT x FROM m", AGENT_BUDGET)).resolves.toMatchObject({ rows: [{ x: 1 }] });
+    expect(sent.at(-1)).toBe("SELECT x FROM m");
   });
 
   test('creates provider for type "druid"', async () => {
@@ -2783,7 +3127,7 @@ describe("acquireExecutionProfileProvider", () => {
 
   test("refuses a provider type without a read-only statement path", async () => {
     const error: unknown = await acquireExecutionProfileProvider(
-      makeConnection("redis", { id: "redis-profile" }),
+      makeConnection("prometheus", { id: "prometheus-profile" }),
       "agent-read-only",
     ).catch((e: unknown) => e);
 
@@ -2792,23 +3136,17 @@ describe("acquireExecutionProfileProvider", () => {
     // The rule is the method, not the kind of boundary behind it: Kubernetes and MongoDB are granted the profile with
     // no database read-only session.
     expect((error as Error).message).toBe(
-      'Provider type "redis" implements no read-only statement path (queryReadOnly)',
+      'Provider type "prometheus" implements no read-only statement path (queryReadOnly)',
     );
     expect(getExecutionProfileCacheStats().size).toBe(0);
   });
 
-  test("refuses firestore the agent's read-only profile, the gate the explain-analyze descriptor's capability check is not", async () => {
-    // `sql.explain.analyze` requires only `supportsExplain`, which Firestore declares for the editor's Explain button
-    // (Firestore spec 5.7), so the refusal of a plan execution on Firestore is this profile gate: no `queryReadOnly`.
+  test("refuses trino the agent's read-only profile, the gate the explain-analyze descriptor's capability check is not", async () => {
+    // `sql.explain.analyze` requires only `supportsExplain`, which Trino declares for the editor's Explain button, so
+    // the refusal of a plan execution on Trino is this profile gate: no `queryReadOnly`.
     expect(sqlExplainAnalyzeDescriptor.requiredCapabilities).toEqual(["supportsExplain"]);
     const error: unknown = await acquireExecutionProfileProvider(
-      makeConnection("firestore", {
-        id: "firestore-profile",
-        host: undefined,
-        port: undefined,
-        password: undefined,
-        database: "demo-studio",
-      }),
+      makeConnection("trino", { id: "trino-profile" }),
       "agent-read-only",
     ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ExecutionProfileError);
@@ -2816,25 +3154,30 @@ describe("acquireExecutionProfileProvider", () => {
     expect(getExecutionProfileCacheStats().size).toBe(0);
   });
 
-  test("serves the SAME engine under the operations profile, which needs no read-only statement path", async () => {
+  test("serves the SAME engine under the operations profile, whose open proves nothing", async () => {
     // Both directions of the workflow-aware engine gate, on one connection. The
     // restriction is a property of the PROFILE, not of the factory: `agent-read-only`
     // sends model-authored statements and is served only where the engine can bound
     // one, while `agent-operations` sends none and calls the curated reporting methods
     // every provider implements. Asserting them together is what keeps a later
-    // simplification from collapsing the two.
+    // simplification from collapsing the two. Redis proves an ACL user of the agent's own
+    // only for an acquisition that sends statements, so a connection naming none is refused
+    // there and still grounds a plan under the operations profile.
     // A Redis database is a number: the shared fixture's "testdb" is refused at connect.
-    const connection = makeConnection("redis", { id: "redis-operations", database: "0" });
+    const connection = makeConnection("redis", { id: "redis-operations", database: "0", user: "" });
 
     const refused: unknown = await acquireExecutionProfileProvider(connection, "agent-read-only").catch(
       (e: unknown) => e,
     );
     expect(refused).toBeInstanceOf(ExecutionProfileError);
+    expect((refused as InstanceType<typeof ExecutionProfileError>).reasonCode).toBe("PROFILE_SERVER_UNENFORCED");
 
     const provider = await acquireExecutionProfileProvider(connection, "agent-operations");
 
     expect(provider.isConnected()).toBe(true);
-    expect(typeof provider.queryReadOnly).not.toBe("function");
+    await expect(
+      provider.queryReadOnly?.("DBSIZE", { maxResultRows: 1, maxResultBytes: 1024, statementTimeoutMs: 1000 }),
+    ).rejects.toThrow("Read-only execution requires a provider opened under the agent read-only profile");
     // It is still a PROFILED acquisition: the operations path may not be handed the
     // editor's writable pool, which is the invariant the profiled cache carries.
     expect(getExecutionProfileCacheStats().size).toBe(1);
@@ -2848,7 +3191,7 @@ describe("acquireExecutionProfileProvider", () => {
     // entries, so a later change to one path's lifecycle cannot reach the other, and
     // neither is ever the editor's writable pool.
     const refused: unknown = await acquireExecutionProfileProvider(
-      makeConnection("redis", { id: "redis-handover" }),
+      makeConnection("prometheus", { id: "prometheus-handover" }),
       "agent-handover",
     ).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(ExecutionProfileError);
@@ -4054,20 +4397,77 @@ describe("single-writer file reuse", () => {
     await expect(agent.queryReadOnly!("INSERT INTO t (id) VALUES (1)", AGENT_BUDGET)).rejects.toThrow();
   });
 
-  test("a profile that sends statements is still refused rather than handed the writable handle", async () => {
-    // The borrow is scoped to `agent-operations`, the profile that sends no statement
-    // at all. `agent-read-only` and `agent-handover` send one, and an engine with no
-    // read-only statement path is refused as it always was - being able to reuse a
-    // handle is not a reason to run a model's statement through a writable one.
+  test("a profile that sends statements opens its own read-only handle beside the writer, never the writable one", async () => {
+    // The borrow is scoped to `agent-operations`, the profile that sends no statement at all. `agent-read-only` sends
+    // the model's statements, so it is never handed the writable handle; it opens one of its own through the read-only
+    // file adapter, which takes no writer lock, so the held lock does not refuse it LOCKED, and no call on it can write.
     const conn = libredbConn();
     const writable = await getOrCreateProvider(conn);
+    await writable.query("put users:1 Ada");
+    const file = conn.database as string;
+    const before = readFileSync(file);
 
-    const error: unknown = await acquireExecutionProfileProvider(conn, "agent-read-only").catch((e: unknown) => e);
+    const agent = await acquireExecutionProfileProvider(conn, "agent-read-only");
 
-    expect(error).toBeInstanceOf(ExecutionProfileError);
-    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_UNSUPPORTED_BY_PROVIDER");
+    expect(agent).not.toBe(writable);
+    expect(getExecutionProfileCacheStats()).toEqual({ size: 1, connections: [conn.id] });
+    expect((await agent.queryReadOnly!("get users:1", AGENT_BUDGET)).rows).toEqual([{ key: "users:1", value: "Ada" }]);
+    // The editor's statement path is refused on the agent's handle, and a write sent past everything, on the
+    // provider's own store, fails on the read-only handle: the file is unchanged either way.
+    await expect(agent.query("put users:9 Mallory")).rejects.toThrow(/answers statements through queryReadOnly only/);
+    const store = (agent as unknown as { kv: { set(key: string, value: string): void } }).kv;
+    expect(() => store.set("users:9", "Mallory")).toThrow(expect.objectContaining({ code: "FAILED" }));
+    expect(readFileSync(file)).toEqual(before);
+    // The writer and the reader coexist: the writer still writes, and the reader's next statement reads it.
+    await writable.query("put users:2 Grace");
+    expect((await agent.queryReadOnly!("get users:2", AGENT_BUDGET)).rowCount).toBe(1);
     expect(writable.isConnected()).toBe(true);
+    // A profiled handle is never offered to the editor's borrow.
+    expect(findOpenSingleWriterProvider(conn)).toBe(writable);
+    await removeProvider(conn.id);
   });
+
+  test("a profiled reader opened first does not lock the editor out of the file", async () => {
+    // The opposite order: before the read-only adapter, an agent run on a file nobody had browsed opened a locking
+    // handle under the profiled key, and the editor's open of the same file was then refused until the idle sweep.
+    const conn = libredbConn();
+    const first = await getOrCreateProvider(conn);
+    await first.query("put users:1 Ada");
+    await removeProvider(conn.id);
+    const agent = await acquireExecutionProfileProvider(conn, "agent-handover");
+    expect(findOpenSingleWriterProvider(conn)).toBeNull();
+
+    const writable = await getOrCreateProvider(conn);
+
+    expect(writable).not.toBe(agent);
+    expect(writable.isConnected()).toBe(true);
+    await writable.query("put users:2 Grace");
+    expect((await agent.queryReadOnly!("prefix users:", AGENT_BUDGET)).rowCount).toBe(2);
+    await removeProvider(conn.id);
+  });
+
+  test.each([
+    ["an agent user and password", { agentUser: "agent", agentPassword: "not-a-real-password" }],
+    ["an agent password alone", { agentPassword: "not-a-real-password" }],
+    ["an agent user alone", { agentUser: "agent" }],
+  ] as const)(
+    "the agent read-only profile refuses %s on this engine before it opens the file",
+    async (_label, credential) => {
+      const conn = libredbConn(credential);
+      const writable = await getOrCreateProvider(conn);
+      const before = readFileSync(conn.database as string);
+
+      const error: unknown = await acquireExecutionProfileProvider(conn, "agent-read-only").catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ExecutionProfileError);
+      expect((error as ExecutionProfileError).reasonCode).toBe("AGENT_CREDENTIAL_UNRESOLVABLE");
+      expect((error as Error).message).toContain("this engine takes none");
+      expect(getExecutionProfileCacheStats().size).toBe(0);
+      expect(readFileSync(conn.database as string)).toEqual(before);
+      expect(writable.isConnected()).toBe(true);
+      await removeProvider(conn.id);
+    },
+  );
 
   test("a configured agent credential opts out of borrowing (fail closed)", async () => {
     // The borrowed handle was opened under the connection's own credentials. An

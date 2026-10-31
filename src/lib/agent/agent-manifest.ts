@@ -27,7 +27,26 @@ import type { AgentRunMode, AgentRunWorkflowType } from "./types";
 import { OPERATIONS_VARIANT } from "./workflow-tool-sets";
 
 /** The statement languages agent mode can send. A later engine reuses one or registers a new id here. */
-export type AgentStatementLanguageId = "sql" | "kubectl" | "mongo";
+export type AgentStatementLanguageId =
+  | "sql"
+  | "kubectl"
+  | "mongo"
+  | "libredbkv"
+  | "influxql"
+  | "weaviateapi"
+  | "qdrantapi"
+  | "cypher"
+  | "milvusrpc"
+  | "rediscli"
+  | "etcdctl"
+  | "oxiacli"
+  | "rabbitread"
+  | "kafkaread"
+  | "s3api"
+  | "fsquery"
+  | "snmpget"
+  | "netconfrpc"
+  | "modbusread";
 
 /** Literal-typed, so `AgentEngineFamily` in `languages/pack.ts` reads each engine's language by type. */
 export const AGENT_STATEMENT_LANGUAGE = Object.freeze({
@@ -39,41 +58,41 @@ export const AGENT_STATEMENT_LANGUAGE = Object.freeze({
   sqlite: "sql",
   libsql: "sql",
   duckdb: "sql",
-  oracle: null,
-  db2: null,
+  oracle: "sql",
+  db2: "sql",
   mssql: "sql",
   clickhouse: "sql",
-  druid: null,
+  druid: "sql",
   trino: null,
-  cassandra: null,
-  elasticsearch: null,
-  opensearch: null,
+  cassandra: "sql",
+  elasticsearch: "sql",
+  opensearch: "sql",
   mongodb: "mongo",
-  couchbase: null,
-  redis: null,
+  couchbase: "sql",
+  redis: "rediscli",
   prometheus: null,
-  kafka: null,
-  etcd: null,
-  neo4j: null,
-  milvus: null,
-  qdrant: null,
-  weaviate: null,
-  influxdb: null,
+  kafka: "kafkaread",
+  etcd: "etcdctl",
+  neo4j: "cypher",
+  milvus: "milvusrpc",
+  qdrant: "qdrantapi",
+  weaviate: "weaviateapi",
+  influxdb: "influxql",
   influxdb3: "sql",
-  oxia: null,
+  oxia: "oxiacli",
   databend: null,
-  s3: null,
+  s3: "s3api",
   kubernetes: "kubectl",
   mqtt: null,
-  firestore: null,
-  rabbitmq: null,
+  firestore: "fsquery",
+  rabbitmq: "rabbitread",
   opcua: null,
   mtconnect: null,
-  modbus: null,
-  netconf: null,
-  snmp: null,
+  modbus: "modbusread",
+  netconf: "netconfrpc",
+  snmp: "snmpget",
   sparkplug: null,
-  libredb: null,
+  libredb: "libredbkv",
 } as const satisfies Record<DatabaseType, AgentStatementLanguageId | null>);
 
 /** The name of the model argument a language's statement arrives in: one type for every reader of it. */
@@ -134,17 +153,21 @@ function packRequirementProjection<Value>(
  * answer it with no provider in hand. A requirement only one language's variants name is its pack's own
  * (`AgentPackVariantRequirement`).
  */
-export type AgentVariantRequirement = "sql-composers" | AgentPackVariantRequirement;
+export type AgentVariantRequirement = "sql-catalog" | "sql-composers" | AgentPackVariantRequirement;
 
 /**
- * The engines each requirement holds on. `sql-composers` is read from the engines' client dialects
+ * The engines each requirement holds on. `sql-catalog` and `sql-composers` are read from the engines' client dialects
  * (`enginesSupporting` in `languages/engines/client.ts`), which say client-safe what each server overlay supplies:
- * the engines that compose both a catalog read and an estimating plan. A pack's requirement holds on the engines its
- * pack names (`AGENT_PACK_REQUIREMENTS`). `agent-manifest.test.ts` holds `sql-composers` to the composed-SQL entry
- * points in `composed-sql.ts` and each pack requirement to the providers that declare its reading.
+ * the engines that compose a catalog read, and those that compose both a catalog read and an estimating plan. A
+ * statement workflow names the one it cannot run without, so a dialect with no estimating plan still opens every
+ * workflow whose verdict cites none; the assessment verdict's table profile is deliberately not held (`client.ts`).
+ * A pack's requirement holds on the engines its pack names (`AGENT_PACK_REQUIREMENTS`).
+ * `agent-manifest.test.ts` holds both SQL requirements to the composed-SQL entry points in `composed-sql.ts` and each
+ * pack requirement to the providers that declare its reading.
  */
 export const AGENT_REQUIREMENT_ENGINES: Readonly<Record<AgentVariantRequirement, readonly DatabaseType[]>> =
   Object.freeze({
+    "sql-catalog": enginesSupporting("catalogRead"),
     "sql-composers": enginesSupporting("catalogRead", "planEstimate"),
     ...packRequirementProjection((spec) => spec.engines),
   } satisfies Record<AgentVariantRequirement, readonly DatabaseType[]>);
@@ -311,10 +334,16 @@ const MANIFEST_TABLES: AgentAvailabilityTables = Object.freeze({
 const NO_VARIANT_SENTENCE =
   "Agent mode does not offer this workflow on this engine. The operations workflow runs here, and plan mode drafts here.";
 
-/** Each requirement's refusal names what the engine lacks, and both ways forward that remain. */
+/**
+ * Each requirement's refusal names what the engine lacks, and the ways forward that remain on every engine it can be
+ * shown on. `sql-composers` is shown on engines that may still hold `sql-catalog`, so its sentence claims no missing
+ * catalog and names no workflow but operations, the one that opens everywhere.
+ */
 const REQUIREMENT_SENTENCES: Readonly<Record<AgentVariantRequirement, string>> = Object.freeze({
+  "sql-catalog":
+    "Agent mode has no verified catalog composition for this engine, so this workflow's tools could only refuse. The operations workflow runs here, and plan mode drafts here.",
   "sql-composers":
-    "Agent mode has no verified catalog or plan composition for this engine, so this workflow's tools could only refuse. The operations workflow runs here, and plan mode drafts here.",
+    "This workflow needs both a catalog read and an estimating plan, and agent mode has no verified composition of both for this engine, so this workflow's tools could only refuse. Workflows that need less still run here, the operations workflow among them, and plan mode drafts here.",
   ...packRequirementProjection((spec) => spec.sentence),
 } satisfies Record<AgentVariantRequirement, string>);
 

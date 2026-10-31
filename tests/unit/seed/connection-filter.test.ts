@@ -1,5 +1,6 @@
-import { describe, it, expect } from "bun:test";
-import { filterByRoles, mergeDefaults } from "@/lib/seed/connection-filter";
+import { describe, it, expect, beforeAll, afterAll, setSystemTime } from "bun:test";
+import { filterByRoles, mergeDefaults, projectSeedConnection, rolesMatch } from "@/lib/seed/connection-filter";
+import { KUBERNETES_REVIEWED_ROLE } from "@/lib/seed/roles";
 import type { SeedConnection, SeedDefaults } from "@/lib/seed/types";
 
 const baseConn: SeedConnection = {
@@ -204,6 +205,28 @@ describe("filterByRoles: engine-specific fields", () => {
     expect(none.serverCertificateThumbprint).toBeUndefined();
   });
 
+  it("carries a NETCONF connection's host key pin through", () => {
+    // Dropped here, the provider would refuse the seed for an empty pin, so no run could open it.
+    const pin = "SHA256:ux1QoYIetXzfp0HM4zDEdPuDHyyUC3vkI5cuC3QcRMU";
+    const [managed] = filterByRoles([{ ...baseConn, type: "netconf", port: 830, hostKeyFingerprint: pin }], ["user"]);
+    const [none] = filterByRoles([{ ...baseConn, type: "netconf", port: 830 }], ["user"]);
+
+    expect(managed.hostKeyFingerprint).toBe(pin);
+    expect(none.hostKeyFingerprint).toBeUndefined();
+  });
+
+  it("carries a Modbus connection's register map through", () => {
+    // Dropped here, a seeded connection would have no map, so every named-point read would be refused for it.
+    const map = JSON.stringify({
+      points: [{ name: "tank_level", unit: 1, table: "holding", address: 0, type: "uint16" }],
+    });
+    const [managed] = filterByRoles([{ ...baseConn, type: "modbus", port: 502, registerMap: map }], ["user"]);
+    const [none] = filterByRoles([{ ...baseConn, type: "modbus", port: 502 }], ["user"]);
+
+    expect(managed.registerMap).toBe(map);
+    expect(none.registerMap).toBeUndefined();
+  });
+
   it("carries a Db2 connection's consent to a cleartext password through (#786)", () => {
     // Dropped here, the provider would refuse a seed whose file did set the consent.
     const [managed] = filterByRoles([{ ...baseConn, type: "db2", port: 50000, allowInsecureAuth: true }], ["user"]);
@@ -344,5 +367,87 @@ describe("filterByRoles: the read-only mode (#1089)", () => {
     expect(() => filterByRoles([merged], ["admin"])).toThrow(
       'Seed connection "test" sets readOnly: true with managed: false.',
     );
+  });
+});
+
+describe("the reserved role", () => {
+  const CALLERS: string[][] = [
+    ["*"],
+    ["admin"],
+    ["user"],
+    ["libredb:ops"],
+    [KUBERNETES_REVIEWED_ROLE],
+    ["*", "admin", "user", "libredb:ops", KUBERNETES_REVIEWED_ROLE],
+  ];
+
+  it("rolesMatch refuses a row carrying it, whatever the caller holds", () => {
+    for (const roles of CALLERS) {
+      expect(rolesMatch([KUBERNETES_REVIEWED_ROLE], roles)).toBe(false);
+    }
+  });
+
+  it("rolesMatch refuses it before the wildcard rule, so a row also carrying * or the caller's role is refused", () => {
+    expect(rolesMatch(["*", KUBERNETES_REVIEWED_ROLE], ["user"])).toBe(false);
+    expect(rolesMatch([KUBERNETES_REVIEWED_ROLE, "admin"], ["admin"])).toBe(false);
+  });
+
+  it("rolesMatch keeps its rules for every other row", () => {
+    expect(rolesMatch(["*"], [])).toBe(true);
+    expect(rolesMatch(["admin"], ["admin"])).toBe(true);
+    expect(rolesMatch(["admin"], ["user"])).toBe(false);
+  });
+
+  it("filterByRoles selects no row carrying it, whatever the caller holds", () => {
+    const reserved: SeedConnection[] = [
+      { ...baseConn, id: "reviewed", roles: [KUBERNETES_REVIEWED_ROLE] },
+      { ...baseConn, id: "reviewed-wildcard", roles: ["*", KUBERNETES_REVIEWED_ROLE] },
+    ];
+    for (const roles of CALLERS) {
+      expect(filterByRoles(reserved, roles)).toEqual([]);
+    }
+  });
+});
+
+describe("projectSeedConnection", () => {
+  // The projection stamps createdAt with the clock, so the clock is held still to compare two projections.
+  beforeAll(() => setSystemTime(new Date("2026-10-29T00:00:00.000Z")));
+  afterAll(() => setSystemTime());
+
+  const CASES: Array<[SeedConnection, string[]]> = [
+    [{ ...baseConn }, ["admin"]],
+    [
+      { ...baseConn, id: "my-pg", managed: true, color: "#FF0000", group: "Backend", environment: "staging" },
+      ["admin"],
+    ],
+    [{ ...baseConn, roles: ["team-billing", "team-dev", "admin"] }, ["user", "team-billing"]],
+    [{ ...baseConn, roles: ["*", "team-secret"] }, ["user"]],
+    [{ ...baseConn, skipObjectScan: true, mcp: true, readOnly: true, ssl: { mode: "require" } }, ["admin"]],
+    [{ ...baseConn, type: "cassandra", localDataCenter: "dc1" }, ["admin"]],
+    [{ ...baseConn, type: "mongodb", authSource: "admin" }, ["admin"]],
+    [{ ...baseConn, type: "elasticsearch", apiKeyId: "seed-key-id", apiKeySecret: "seed-key-secret" }, ["admin"]],
+  ];
+
+  it("is filterByRoles' projection, field for field, for every row the filter selects", () => {
+    for (const [conn, roles] of CASES) {
+      expect(projectSeedConnection(conn, roles)).toStrictEqual(filterByRoles([conn], roles)[0]);
+    }
+  });
+
+  it("projects a row the roles do not select, sending only the roles the caller holds", () => {
+    const projected = projectSeedConnection({ ...baseConn, roles: ["admin", "team-dev"] }, ["user"]);
+    expect(projected.seedId).toBe("test");
+    expect(projected.roles).toEqual([]);
+  });
+
+  it("keeps both of the mapper's refusals", () => {
+    expect(() => projectSeedConnection({ ...baseConn, readOnly: true, managed: false }, ["admin"])).toThrow(
+      'Seed connection "test" sets readOnly: true with managed: false.',
+    );
+    expect(() =>
+      projectSeedConnection(
+        { ...baseConn, type: "opensearch", apiKeyId: "seed-key-id", apiKeySecret: "seed-key-secret" },
+        ["admin"],
+      ),
+    ).toThrow(/Elasticsearch-only/);
   });
 });

@@ -11,8 +11,24 @@
  * `"unsupported"`. That is what grounding and statistics need, since they run on every engine in plan mode.
  */
 import type { DatabaseType } from "@/lib/types";
+import { INFLUXDB_SERVER_OVERLAY } from "../influxql/engines/influxdb";
 import { KUBERNETES_SERVER_OVERLAY } from "../kubectl/engines/kubernetes";
+import { LIBREDB_SERVER_OVERLAY } from "../libredbkv/engines/libredb";
 import { MONGODB_SERVER_OVERLAY } from "../mongo/engines/mongodb";
+import { WEAVIATE_SERVER_OVERLAY } from "../weaviateapi/engines/weaviate";
+import { QDRANT_SERVER_OVERLAY } from "../qdrantapi/engines/qdrant";
+import { NEO4J_SERVER_OVERLAY } from "../cypher/engines/neo4j";
+import { MILVUS_SERVER_OVERLAY } from "../milvusrpc/engines/milvus";
+import { REDIS_SERVER_OVERLAY } from "../rediscli/engines/redis";
+import { ETCD_SERVER_OVERLAY } from "../etcdctl/engines/etcd";
+import { OXIA_SERVER_OVERLAY } from "../oxiacli/engines/oxia";
+import { RABBITMQ_SERVER_OVERLAY } from "../rabbitread/engines/rabbitmq";
+import { KAFKA_SERVER_OVERLAY } from "../kafkaread/engines/kafka";
+import { S3_SERVER_OVERLAY } from "../s3api/engines/s3";
+import { FIRESTORE_SERVER_OVERLAY } from "../fsquery/engines/firestore";
+import { SNMP_SERVER_OVERLAY } from "../snmpget/engines/snmp";
+import { NETCONF_SERVER_OVERLAY } from "../netconfrpc/engines/netconf";
+import { MODBUS_SERVER_OVERLAY } from "../modbusread/engines/modbus";
 import type { AgentStatementLanguageId } from "../../agent-manifest";
 import { statementFamilyOf } from "../client";
 import { defineOverlay } from "../overlay";
@@ -25,12 +41,19 @@ import type {
   FacetOverrides,
 } from "../pack";
 import { languageServerPack } from "../server";
+import { CASSANDRA_SERVER_OVERLAY } from "../sql/engines/cassandra";
 import { CLICKHOUSE_SERVER_OVERLAY } from "../sql/engines/clickhouse";
+import { COUCHBASE_SERVER_OVERLAY } from "../sql/engines/couchbase";
+import { DB2_SERVER_OVERLAY } from "../sql/engines/db2";
+import { DRUID_SERVER_OVERLAY } from "../sql/engines/druid";
 import { DUCKDB_SERVER_OVERLAY } from "../sql/engines/duckdb";
+import { ELASTICSEARCH_SERVER_OVERLAY } from "../sql/engines/elasticsearch";
 import { INFLUXDB3_SERVER_OVERLAY } from "../sql/engines/influxdb3";
 import { LIBSQL_SERVER_OVERLAY } from "../sql/engines/libsql";
 import { MSSQL_SERVER_OVERLAY } from "../sql/engines/mssql";
 import { MYSQL_SERVER_OVERLAY } from "../sql/engines/mysql";
+import { OPENSEARCH_SERVER_OVERLAY } from "../sql/engines/opensearch";
+import { ORACLE_SERVER_OVERLAY } from "../sql/engines/oracle";
 import { POSTGRES_SERVER_OVERLAY } from "../sql/engines/postgres";
 import { SQLITE_SERVER_OVERLAY } from "../sql/engines/sqlite";
 import { engineFamily } from "./client";
@@ -44,8 +67,31 @@ const SERVER_OVERLAYS: AgentEngineServerOverlays = Object.freeze({
   clickhouse: Object.freeze({ ...CLICKHOUSE_SERVER_OVERLAY }),
   libsql: Object.freeze({ ...LIBSQL_SERVER_OVERLAY }),
   influxdb3: Object.freeze({ ...INFLUXDB3_SERVER_OVERLAY }),
+  elasticsearch: Object.freeze({ ...ELASTICSEARCH_SERVER_OVERLAY }),
+  opensearch: Object.freeze({ ...OPENSEARCH_SERVER_OVERLAY }),
+  oracle: Object.freeze({ ...ORACLE_SERVER_OVERLAY }),
+  db2: Object.freeze({ ...DB2_SERVER_OVERLAY }),
+  cassandra: Object.freeze({ ...CASSANDRA_SERVER_OVERLAY }),
+  couchbase: Object.freeze({ ...COUCHBASE_SERVER_OVERLAY }),
+  druid: Object.freeze({ ...DRUID_SERVER_OVERLAY }),
   mongodb: Object.freeze({ ...MONGODB_SERVER_OVERLAY }),
   kubernetes: Object.freeze({ ...KUBERNETES_SERVER_OVERLAY }),
+  libredb: Object.freeze({ ...LIBREDB_SERVER_OVERLAY }),
+  influxdb: Object.freeze({ ...INFLUXDB_SERVER_OVERLAY }),
+  weaviate: Object.freeze({ ...WEAVIATE_SERVER_OVERLAY }),
+  qdrant: Object.freeze({ ...QDRANT_SERVER_OVERLAY }),
+  neo4j: Object.freeze({ ...NEO4J_SERVER_OVERLAY }),
+  milvus: Object.freeze({ ...MILVUS_SERVER_OVERLAY }),
+  redis: Object.freeze({ ...REDIS_SERVER_OVERLAY }),
+  etcd: Object.freeze({ ...ETCD_SERVER_OVERLAY }),
+  oxia: Object.freeze({ ...OXIA_SERVER_OVERLAY }),
+  rabbitmq: Object.freeze({ ...RABBITMQ_SERVER_OVERLAY }),
+  kafka: Object.freeze({ ...KAFKA_SERVER_OVERLAY }),
+  s3: Object.freeze({ ...S3_SERVER_OVERLAY }),
+  firestore: Object.freeze({ ...FIRESTORE_SERVER_OVERLAY }),
+  snmp: Object.freeze({ ...SNMP_SERVER_OVERLAY }),
+  netconf: Object.freeze({ ...NETCONF_SERVER_OVERLAY }),
+  modbus: Object.freeze({ ...MODBUS_SERVER_OVERLAY }),
 } satisfies AgentEngineServerOverlays);
 
 /** What an engine with no dialect answers: every member unsupported. */

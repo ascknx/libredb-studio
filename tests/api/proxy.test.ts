@@ -1,5 +1,5 @@
 import { withBasePathEnv } from "../helpers/base-path";
-import { describe, test, expect, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, test, expect, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import { SignJWT } from "jose";
@@ -820,5 +820,196 @@ describe("proxy under a nested basePath", () => {
       });
       expect((await proxy(request)).status).toBe(403);
     });
+  });
+});
+
+// openshift sign-in mode: the cluster is the only way in, so a signed-out GET /login goes straight to the OpenShift
+// login route (no variable turns it off), carrying `next` only when it is safe; with `error` present the page renders,
+// so a failure shows its message instead of looping. Both OpenShift routes are reachable signed out.
+describe("proxy in openshift sign-in mode", () => {
+  const PUBLIC_LOGIN_ROUTE = "https://studio.apps.example.com/api/auth/openshift/login";
+  const savedPublicUrl = process.env.OPENSHIFT_PUBLIC_URL;
+
+  beforeEach(() => {
+    process.env.OPENSHIFT_PUBLIC_URL = "https://studio.apps.example.com";
+  });
+
+  afterEach(() => {
+    if (savedPublicUrl === undefined) delete process.env.OPENSHIFT_PUBLIC_URL;
+    else process.env.OPENSHIFT_PUBLIC_URL = savedPublicUrl;
+  });
+
+  test("a signed-out GET /login goes to the OpenShift login route under the public URL, with a safe next only", async () => {
+    await withAutoRedirectEnv("openshift", undefined, async () => {
+      const plain = await proxy(createNextRequest("/login"));
+      expect(plain.status).toBe(307);
+      expect(getRedirectLocation(plain)).toBe(PUBLIC_LOGIN_ROUTE);
+      expect(plain.headers.get("cache-control")).toBe("no-store");
+      const withNext = await proxy(createNextRequest("/login?next=%2Fsql"));
+      expect(getRedirectLocation(withNext)).toBe(`${PUBLIC_LOGIN_ROUTE}?next=%2Fsql`);
+      const unsafe = await proxy(createNextRequest("/login?next=%2F%2Fevil.example"));
+      expect(getRedirectLocation(unsafe)).toBe(PUBLIC_LOGIN_ROUTE);
+    });
+  });
+
+  test("a forged Host, X-Forwarded-Host or request URL never changes where the redirect goes", async () => {
+    await withAutoRedirectEnv("openshift", undefined, async () => {
+      const headers = new Headers({
+        host: "evil.example",
+        "x-forwarded-host": "evil.example",
+        "x-forwarded-proto": "http",
+        "x-forwarded-port": "8080",
+      });
+      const res = await proxy(new NextRequest("http://evil.example/login?next=%2Fsql", { headers }));
+      expect(getRedirectLocation(res)).toBe(`${PUBLIC_LOGIN_ROUTE}?next=%2Fsql`);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+  });
+
+  // A relative Location from the proxy is parsed by Next's proxy adapter with `new NextURL(location)` and no base, so
+  // the real server would answer 500. The page renders instead, and its sign-in button reaches the login route, which
+  // answers /login?error=openshift_config (tests/api/auth/openshift-login.test.ts).
+  test("when the public URL does not read, the login page renders with no redirect, relative or absolute", async () => {
+    for (const unreadable of [undefined, "http://not-https.example.com"]) {
+      if (unreadable === undefined) delete process.env.OPENSHIFT_PUBLIC_URL;
+      else process.env.OPENSHIFT_PUBLIC_URL = unreadable;
+      await withAutoRedirectEnv("openshift", undefined, async () => {
+        const res = await proxy(createNextRequest("/login?next=%2Fsql"));
+        expect(isRedirect(res)).toBe(false);
+        expect(getRedirectLocation(res)).toBeNull();
+        expect(res.headers.get("x-middleware-next")).toBe("1");
+      });
+    }
+  });
+
+  test("the redirect keeps the base path", async () => {
+    process.env.OPENSHIFT_PUBLIC_URL = "https://studio.apps.example.com/studio";
+    await withBasePathEnv("/studio", async () => {
+      await withAutoRedirectEnv("openshift", undefined, async () => {
+        const res = await proxy(createNextRequest("/login"));
+        expect(getRedirectLocation(res)).toBe("https://studio.apps.example.com/studio/api/auth/openshift/login");
+      });
+    });
+  });
+
+  test("with an error code the login page renders, so a failure is shown instead of looping", async () => {
+    await withAutoRedirectEnv("openshift", undefined, async () => {
+      const res = await proxy(createNextRequest("/login?error=openshift_scope"));
+      expect(isRedirect(res)).toBe(false);
+    });
+  });
+
+  test("OIDC's automatic redirect stays off in openshift mode, and local mode renders the page", async () => {
+    await withAutoRedirectEnv("openshift", "true", async () => {
+      expect(getRedirectLocation(await proxy(createNextRequest("/login")))).toBe(PUBLIC_LOGIN_ROUTE);
+    });
+    await withAutoRedirectEnv("local", undefined, async () => {
+      expect(isRedirect(await proxy(createNextRequest("/login")))).toBe(false);
+    });
+  });
+
+  test("both OpenShift routes are reachable signed out", async () => {
+    await withAutoRedirectEnv("openshift", undefined, async () => {
+      for (const path of ["/api/auth/openshift/login", "/api/auth/openshift/callback?code=x&state=y"]) {
+        const res = await proxy(createNextRequest(path));
+        expect(res.status, path).toBe(200);
+        expect(isRedirect(res), path).toBe(false);
+      }
+    });
+  });
+});
+
+// Whenever the auth cookies are Secure the session cookie is __Host-auth-token, and the proxy reads that name alone,
+// decided from the request's own Host and x-forwarded-proto exactly as the route handlers decide it.
+describe("proxy with host-prefixed cookie names", () => {
+  const setNodeEnv = (value: string | undefined) => {
+    if (value === undefined) delete (process.env as Record<string, string>).NODE_ENV;
+    else (process.env as Record<string, string>).NODE_ENV = value;
+  };
+
+  async function inProduction(action: () => Promise<void>): Promise<void> {
+    const previous = process.env.NODE_ENV;
+    setNodeEnv("production");
+    try {
+      await action();
+    } finally {
+      setNodeEnv(previous);
+    }
+  }
+
+  function request(
+    url: string,
+    host: string,
+    cookie?: string,
+    basePath?: string,
+    forwardedProto?: string,
+  ): NextRequest {
+    const headers: Record<string, string> = { host };
+    if (cookie !== undefined) headers.cookie = cookie;
+    if (forwardedProto !== undefined) headers["x-forwarded-proto"] = forwardedProto;
+    return new NextRequest(url, { headers, ...(basePath ? { nextConfig: { basePath } } : {}) });
+  }
+
+  // A proxy that terminates TLS and forwards to loopback: the route handlers name the cookie __Host-auth-token from
+  // x-forwarded-proto, so the proxy must read that header too, or every sign-in loops back to /login.
+  test("a loopback host behind a TLS proxy reads __Host-auth-token only", async () => {
+    const token = await createToken("user");
+    await inProduction(async () => {
+      const prefixed = await proxy(
+        request("http://localhost:3000/", "localhost:3000", `__Host-auth-token=${token}`, undefined, "https"),
+      );
+      expect(isRedirect(prefixed)).toBe(false);
+      const plain = await proxy(
+        request("http://localhost:3000/", "localhost:3000", `auth-token=${token}`, undefined, "https"),
+      );
+      expect(getRedirectLocation(plain)).toBe("http://localhost:3000/login");
+    });
+  });
+
+  test("a page with only a valid plain-named cookie goes to sign in", async () => {
+    const token = await createToken("user");
+    await inProduction(async () => {
+      const res = await proxy(request("https://studio.example.com/", "studio.example.com", `auth-token=${token}`));
+      expect(getRedirectLocation(res)).toBe("https://studio.example.com/login");
+    });
+  });
+
+  test("a page with a valid __Host-auth-token passes, and /login sends it to its landing page", async () => {
+    const token = await createToken("admin");
+    await inProduction(async () => {
+      const page = await proxy(
+        request("https://studio.example.com/", "studio.example.com", `__Host-auth-token=${token}`),
+      );
+      expect(isRedirect(page)).toBe(false);
+      const login = await proxy(
+        request("https://studio.example.com/login", "studio.example.com", `__Host-auth-token=${token}`),
+      );
+      expect(getRedirectLocation(login)).toBe("https://studio.example.com/admin");
+    });
+  });
+
+  test("a loopback host over plain http reads the plain name only", async () => {
+    const token = await createToken("user");
+    await inProduction(async () => {
+      const prefixed = await proxy(request("http://localhost:3000/", "localhost:3000", `__Host-auth-token=${token}`));
+      expect(getRedirectLocation(prefixed)).toBe("http://localhost:3000/login");
+      const plain = await proxy(request("http://localhost:3000/", "localhost:3000", `auth-token=${token}`));
+      expect(isRedirect(plain)).toBe(false);
+    });
+  });
+
+  test("under a base path the name carrying its segments is the one read", async () => {
+    const token = await createToken("user");
+    await withBasePathEnv("/tools/libredb", () =>
+      inProduction(async () => {
+        const url = "https://studio.example.com/tools/libredb/";
+        const bare = await proxy(request(url, "studio.example.com", `__Host-auth-token=${token}`, "/tools/libredb"));
+        expect(getRedirectLocation(bare)).toBe("https://studio.example.com/tools/libredb/login");
+        const suffixed = await proxy(
+          request(url, "studio.example.com", `__Host-auth-token.tools.libredb=${token}`, "/tools/libredb"),
+        );
+        expect(isRedirect(suffixed)).toBe(false);
+      }),
+    );
   });
 });

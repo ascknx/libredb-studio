@@ -994,6 +994,48 @@ describe("foldLedgerEntries", () => {
       expect(view.items[2].detail).toBe("12 tables, fingerprint abcdef12");
     });
 
+    /**
+     * U189: a capture whose provider could list nothing without configuration the connection lacks. "0 tables" read
+     * as a database holding none; the line says nothing was listed, with the provider's reason.
+     */
+    test("a capture that listed nothing for want of configuration says so with its reason, not a count of none", () => {
+      const reason = "this connection keeps no register map, so none of its points can be listed";
+      const kinds = [
+        { id: "coil", role: "relation", label: "Coil", labelPlural: "Coils", unavailable: reason },
+        {
+          id: "holding_register",
+          role: "relation",
+          label: "Holding register",
+          labelPlural: "Holding registers",
+          unavailable: reason,
+        },
+      ] as const;
+      const snapshot = { connectionId: "c1", fingerprint: "abcdef1234567890", capturedAtMs: 1, objects: [], kinds };
+      const view = foldLedgerEntries([
+        event({
+          kind: "event",
+          event: { kind: "context-captured", atMs: 3, fingerprint: "abcdef1234567890", tableCount: 0, snapshot },
+        } as AgentLedgerEntry & { kind: "event" }),
+        event({
+          kind: "event",
+          event: {
+            kind: "context-captured",
+            atMs: 4,
+            fingerprint: "1234567890abcdef",
+            tableCount: 0,
+            snapshot: {
+              ...snapshot,
+              fingerprint: "1234567890abcdef",
+              kinds: [{ ...kinds[0], unavailable: undefined }],
+            },
+          },
+        } as AgentLedgerEntry & { kind: "event" }),
+      ]);
+
+      expect(view.items[0].detail).toBe(`no tables listed (${reason}), fingerprint abcdef12`);
+      expect(view.items[1].detail).toBe("0 tables, fingerprint 12345678");
+    });
+
     test("anything the run FOUND is not chrome", () => {
       const view = foldLedgerEntries([
         event({
@@ -1473,6 +1515,34 @@ describe("foldLedgerEntries", () => {
 
     expect(view.items[0].headline).toBe("The database refused the statement");
     expect(view.items[0].quoted).toBe('relation "custmers" does not exist');
+  });
+
+  test("a statement the provider refused before sending it says so, and quotes nothing as the engine's", () => {
+    const view = foldLedgerEntries([
+      event({
+        kind: "event",
+        event: {
+          kind: "tool-refused",
+          atMs: 10,
+          stepId: "s1",
+          refusal: {
+            class: "database-error",
+            statementFingerprint: "fp1",
+            message: "Read-only execution refused the statement before sending it: not-a-real-fence",
+            elapsedMs: 1,
+            answered: false,
+            sent: false,
+          },
+        },
+      }),
+    ]);
+
+    expect(view.items[0].headline).toBe("Refused before the database");
+    expect(view.items[0].detail).toBe("Read-only execution refused the statement before sending it: not-a-real-fence");
+    expect(view.items[0].quoted).toBeUndefined();
+    // The run still spent a statement and a repair attempt on it, as the tool layer charged them.
+    expect(view.budget.find((meter) => meter.id === "statements")?.used).toBe(1);
+    expect(view.budget.find((meter) => meter.id === "repairs")?.used).toBe(1);
   });
 
   test("a refused reading is its own outcome, and quotes nothing, because no engine wrote it", () => {

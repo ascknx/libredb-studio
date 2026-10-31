@@ -75,8 +75,8 @@
     },
     "authProvider": {
       "type": "string",
-      "enum": ["local", "oidc"],
-      "description": "Authentication provider"
+      "enum": ["local", "oidc", "openshift"],
+      "description": "Authentication provider; openshift needs openshiftRoute.enabled with openshiftRoute.host, one replica and an application image after 1.1.0"
     },
     "secrets": {
       "type": "object",
@@ -246,7 +246,7 @@
         },
         "sessionTtlSeconds": {
           "anyOf": [{ "type": "null" }, { "type": "string", "maxLength": 0 }, { "type": "integer", "minimum": 300, "maximum": 86400 }],
-          "description": "AUTH_SESSION_TTL_SECONDS: null (default) writes nothing and the app keeps 86400, otherwise whole seconds from 300 to 86400"
+          "description": "AUTH_SESSION_TTL_SECONDS: null (default) writes nothing and the app keeps 86400, or 28800 with authProvider=openshift, otherwise whole seconds from 300 to 86400"
         },
         "allowCustomConnections": {
           "type": ["boolean", "null"],
@@ -549,6 +549,68 @@
           "type": "object",
           "description": "Annotations to add to all route resources",
           "additionalProperties": { "type": "string" }
+        },
+        "main": {
+          "type": "object",
+          "description": "The default route, rendered with the release's full name. Same fields as any other route name",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether this route is enabled",
+              "default": false
+            },
+            "apiVersion": {
+              "type": "string",
+              "description": "Kubernetes API version for the route",
+              "default": "gateway.networking.k8s.io/v1"
+            },
+            "kind": {
+              "type": "string",
+              "description": "Kubernetes resource kind for the route. Only HTTPRoute is supported: the template renders an HTTPRoute-shaped body (path matches), which other route kinds reject",
+              "enum": ["HTTPRoute"],
+              "default": "HTTPRoute"
+            },
+            "parentRefs": {
+              "type": "array",
+              "description": "parentRefs for the route (see Gateway API)",
+              "items": { "type": "object" }
+            },
+            "hostnames": {
+              "type": "array",
+              "description": "Hostnames for the route",
+              "items": { "type": "string" }
+            },
+            "additionalRules": {
+              "type": "array",
+              "description": "Additional rules to append to `spec.rules`",
+              "items": { "type": "object" }
+            },
+            "httpsRedirect": {
+              "type": "boolean",
+              "description": "If true, add an HTTPS redirect filter"
+            },
+            "filters": {
+              "type": "array",
+              "description": "List of route filters",
+              "items": { "type": "object" }
+            },
+            "matches": {
+              "type": "array",
+              "description": "List of match rules",
+              "items": { "type": "object" }
+            },
+            "labels": {
+              "type": "object",
+              "description": "Labels specific to this route",
+              "additionalProperties": { "type": "string" }
+            },
+            "annotations": {
+              "type": "object",
+              "description": "Annotations specific to this route",
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "additionalProperties": true
         }
       }
     },
@@ -636,6 +698,123 @@
               "maxLength": 63,
               "pattern": "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$",
               "description": "app.openshift.io/runtime label (Topology icon) on every Deployment and pod template; empty renders none"
+            }
+          }
+        },
+        "signIn": {
+          "type": "object",
+          "description": "openshift sign-in (authProvider=openshift); nothing here renders in another mode",
+          "additionalProperties": false,
+          "properties": {
+            "tokenExpirationSeconds": {
+              "type": "integer",
+              "minimum": 600,
+              "maximum": 86400,
+              "default": 600,
+              "description": "Lifetime of the projected token, audience libredb-studio-oauth-client, that Studio sends to the OAuth server as its client secret"
+            },
+            "reviewCacheSeconds": {
+              "anyOf": [{ "type": "null" }, { "type": "string", "maxLength": 0 }, { "type": "integer", "minimum": 0, "maximum": 60 }],
+              "description": "KUBERNETES_ACCESS_REVIEW_CACHE_SECONDS: null (default) writes nothing and the app keeps 15 in this mode, otherwise whole seconds from 0 to 60"
+            },
+            "review": {
+              "type": "string",
+              "default": "",
+              "pattern": "^\\s*$|^\\s*([a-z]+|\\*)\\s+[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?(/[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)?(\\s+-n\\s+[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?\\s*$",
+              "description": "KUBERNETES_ACCESS_REVIEW_SIGN_IN, a review a person must also pass to sign in, as oc auth can-i takes it: <verb> <resource>[.<group>][/<name>] [-n <namespace>]. Empty (default) writes nothing"
+            }
+          }
+        },
+        "consoleLink": {
+          "type": "object",
+          "description": "The console.openshift.io/v1 ConsoleLink to https://<openshiftRoute.host><config.basePath>; needs console.openshift.io/v1 or global.compatibility.openshift.apis=force",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean", "default": false, "description": "Render the ConsoleLink" },
+            "location": {
+              "type": "string",
+              "enum": ["ApplicationMenu", "NamespaceDashboard"],
+              "default": "ApplicationMenu",
+              "description": "ApplicationMenu (the application launcher) or NamespaceDashboard (the dashboard of the namespaces named below)"
+            },
+            "section": { "type": "string", "minLength": 1, "default": "LibreDB", "description": "The ApplicationMenu section the link is listed under" },
+            "text": { "type": "string", "minLength": 1, "default": "LibreDB Studio", "description": "The link's text" },
+            "imageUrl": {
+              "type": "string",
+              "default": "",
+              "pattern": "^$|^https://\\S+$|^data:image/\\S+$",
+              "description": "The ApplicationMenu icon, 24 by 24, as an https URL or a data:image URI; empty renders none"
+            },
+            "namespaces": {
+              "type": "array",
+              "uniqueItems": true,
+              "default": [],
+              "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+              "description": "NamespaceDashboard only: the namespaces whose dashboard shows the link"
+            },
+            "namespaceSelector": {
+              "type": "object",
+              "default": {},
+              "description": "NamespaceDashboard only: a label selector (matchLabels, matchExpressions) for those namespaces"
+            }
+          }
+        },
+        "consolePlugin": {
+          "type": "object",
+          "description": "The OpenShift console plugin: its nginx server in openshift.consolePlugin.namespace and the cluster-scoped ConsolePlugin libredb-studio; needs console.openshift.io/v1 or global.compatibility.openshift.apis=force, discovery and the ApplicationMenu console link",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Render the plugin server and the ConsolePlugin"
+            },
+            "namespace": {
+              "type": "string",
+              "default": "",
+              "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$",
+              "description": "Where the plugin server runs: a namespace a cluster admin created with oc create namespace and only cluster admins write; the operator sets its own namespace (WATCH_NAMESPACE), the cluster Studio namespace"
+            },
+            "image": {
+              "type": "string",
+              "pattern": "^$|^[^\\s@]+@sha256:[a-f0-9]{64}$",
+              "description": "The plugin image, a whole reference pinned by digest; the operator sets it from RELATED_IMAGE_PLUGIN"
+            },
+            "imagePullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"],
+              "default": "IfNotPresent",
+              "description": "The plugin server's image pull policy"
+            },
+            "replicas": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "default": 2,
+              "description": "Plugin server replicas"
+            },
+            "resources": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The plugin server's requests and limits, cpu and memory only",
+              "properties": {
+                "requests": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "cpu": { "type": ["string", "number"] },
+                    "memory": { "type": ["string", "number"] }
+                  }
+                },
+                "limits": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "cpu": { "type": ["string", "number"] },
+                    "memory": { "type": ["string", "number"] }
+                  }
+                }
+              }
             }
           }
         }
@@ -751,8 +930,8 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "type": "boolean",
-          "description": "Enable NetworkPolicy"
+          "type": ["boolean", "null"],
+          "description": "Render the NetworkPolicy: null (default) renders it only in openshift sign-in mode with Kubernetes discovery on, false never, true always"
         },
         "additionalIngress": {
           "type": "array",
@@ -857,6 +1036,15 @@
               }
             }
           }
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Serve the bundled PostgreSQL over TLS; off, the chart writes sslmode=disable into STORAGE_POSTGRES_URL"
+            }
+          }
         }
       }
     },
@@ -957,15 +1145,46 @@
               "type": "array",
               "uniqueItems": true,
               "default": [],
-              "items": { "type": "string", "enum": ["cnpg"] },
-              "description": "KUBERNETES_DISCOVERY_KINDS: empty (default) writes nothing and the exporter reads every supported kind"
+              "items": { "type": "string", "enum": ["cnpg", "edbpg", "pgo", "mongo"] },
+              "description": "KUBERNETES_DISCOVERY_KINDS: empty (default) writes nothing and the exporter discovers cnpg alone; each kind needs its CRD on the cluster"
             },
             "maxAgeMs": {
               "anyOf": [{ "type": "null" }, { "type": "string", "maxLength": 0 }, { "type": "integer", "minimum": 1 }],
               "description": "SEED_KUBERNETES_DISCOVERY_MAX_AGE_MS: null (default) writes nothing and the app keeps 180000"
             },
-            "resources": { "type": "object", "default": {}, "description": "Resources of the exporter container" }
+            "resources": { "type": "object", "default": {}, "description": "Resources of the exporter container" },
+            "clusterDomain": {
+              "anyOf": [
+                { "type": "null" },
+                { "type": "string", "maxLength": 0 },
+                {
+                  "type": "string",
+                  "maxLength": 253,
+                  "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+                  "not": { "pattern": "^svc(\\.|$)" }
+                }
+              ],
+              "description": "SEED_KUBERNETES_DISCOVERY_CLUSTER_DOMAIN, the cluster's DNS domain, such as cluster.local; its first label may not be svc. null (default) writes nothing and the app keeps cluster.local"
+            }
           }
+        }
+      }
+    },
+    "operator": {
+      "type": "object",
+      "description": "Set by the OLM operator (operator/watches.yaml); a Helm install leaves both defaults",
+      "additionalProperties": false,
+      "properties": {
+        "managed": {
+          "anyOf": [{ "type": "boolean" }, { "type": "string", "enum": ["true", "false"] }],
+          "default": false,
+          "description": "Set by the operator: cross-namespace and cluster-scoped objects then render only for the release in operator.clusterStudioNamespace. Also the string \"true\" or \"false\", since helm-operator applies watches.yaml overrideValues as strings"
+        },
+        "clusterStudioNamespace": {
+          "type": "string",
+          "default": "",
+          "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$",
+          "description": "The namespace of the one LibreDBStudio allowed cross-namespace and cluster-scoped objects, which the operator sets to its own namespace; empty allows none"
         }
       }
     }

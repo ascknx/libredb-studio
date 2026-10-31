@@ -77,7 +77,9 @@ import { httpTransportFetch } from "@/lib/db/http/egress-policy";
 import type { DatabaseConnection } from "@/lib/db/types";
 import { quoteUnsafeIntegers } from "@/lib/db/utils/json-integers";
 import { uniqueFieldNames } from "@/lib/db/utils/result-fields";
+import { measureRowBytes } from "../read-only-budget";
 import {
+  SearchBoundsError,
   type SearchClusterHealth,
   type SearchDialectId,
   type SearchErrorCategory,
@@ -85,6 +87,7 @@ import {
   type SearchMappingField,
   type SearchObjectDefinition,
   type SearchObjectInfo,
+  type SearchQueryBounds,
   type SearchQueryResult,
   type SearchRow,
   type SearchTransport,
@@ -113,6 +116,24 @@ const JSON_CONTENT_TYPE = "application/json";
 
 /** The version payload (fixtures `es-root.json`, `os-root.json`). */
 const ROOT_PATH = "/";
+
+/**
+ * The cluster settings, read for the one setting a product's SQL DELETE hangs on. A user reads it with the cluster
+ * action `cluster:monitor/state` (measured on OpenSearch 3.8.0 with security on: 403 without it).
+ */
+const CLUSTER_SETTINGS_PATH = "/_cluster/settings";
+
+/** The levels a setting is answered at, the one that wins first. */
+const SETTING_LEVELS = Object.freeze(["transient", "persistent", "defaults"]);
+
+/** The fresh name a DELETE probe names: this prefix and 32 random hex digits, so no index holds it. */
+const DELETE_PROBE_PREFIX = "libredb_delete_probe_";
+
+/**
+ * The failures of a DELETE probe that say nothing about the DELETE: the request was refused, never reached the
+ * engine, or was not waited for. Each is thrown as it is, so the open reports it rather than a DELETE it never read.
+ */
+const REQUEST_REFUSALS: ReadonlySet<SearchErrorCategory> = new Set(["auth", "unreachable", "cancelled", "timeout"]);
 
 /**
  * The index listing. `bytes=b` asks for machine-readable sizes; the default is
@@ -329,6 +350,32 @@ const CURSOR_FIELD = "cursor";
  */
 const MAX_PAGES = 1000;
 
+/** The request member that sets a statement's page size; both products spell it the same way. */
+const FETCH_SIZE_FIELD = "fetch_size";
+
+/**
+ * The largest page a bounded statement asks for.
+ *
+ * Measured on Elasticsearch 9.1.4: `SELECT k FROM probe_buckets` with `fetch_size`
+ * 10000 answers its rows, and with 10001 it fails ("Result window is too large, from +
+ * size must be less than or equal to: [10000]"), the `index.max_result_window` default.
+ * An aggregation took 20001 without complaint, so the limit is the hit query's alone, and
+ * a bound past it is reached by following the cursor instead of by one larger page.
+ */
+const MAX_FETCH_SIZE = 10_000;
+
+/**
+ * How many bytes one page of a bounded statement may carry before it is abandoned unread:
+ * three times the byte bound plus this. A page carries its rows as arrays and its first
+ * page a column declaration, while the bound measures the rows as keyed objects, so a page
+ * within the bound is well inside the cap and the cap only stops a page that could never
+ * have been returned. The 64 KiB covers the declaration and the envelope of a small bound.
+ */
+const PAGE_ENVELOPE_ALLOWANCE = 65_536;
+
+/** How long the close of a cursor a failed page left open may take, on a signal of its own. */
+const CURSOR_CLOSE_MS = 5_000;
+
 /**
  * The `_cat/indices` columns this transport reads, by their wire spelling.
  *
@@ -413,6 +460,8 @@ const ERROR_FIELDS = Object.freeze({
    * "For input string: \"abc\"".
    */
   DETAILS: "details",
+  /** The refusal's own HTTP status, beside the envelope; read when the response's status is a success. */
+  STATUS: "status",
 } as const);
 
 /**
@@ -507,6 +556,36 @@ interface SearchDialectSpec {
    * grammar, or null when it needs none.
    */
   readonly syntaxTypePattern: RegExp | null;
+  /**
+   * Whether a bounded statement asks for its page size (`fetch_size`), one row past the row bound.
+   *
+   * Elasticsearch 9.1.4: true, and its aggregations page by it. OpenSearch 3.8.0: false. With a page size, a
+   * `GROUP BY` either fails ("invalid value operation on MISSING_VALUE", `IllegalStateException`) or is answered by the
+   * plugin's older engine, which cuts it at 200 rows with no cursor and no sign of the cut (measured:
+   * `SELECT COUNT(*) FROM probe_buckets GROUP BY k` over 1,500 groups answered 200 rows); without one, both answer
+   * whole, and a plain `SELECT` past `plugins.query.size_limit` answers that many rows and a cursor, which is followed.
+   */
+  readonly boundedFetchSize: boolean;
+  /** The DELETE the SQL plugin holds behind a cluster setting, or null where the grammar holds none. */
+  readonly sqlDelete: SqlDeleteSwitch | null;
+  /**
+   * The cluster setting that caps how many rows the SQL plugin answers, or null where none is declared.
+   *
+   * OpenSearch: `plugins.query.size_limit`, 10000 by default. Measured on 3.8.0 with it at 1000: a 1,500-row
+   * `SELECT k FROM probe_buckets` answers 1,000 rows and a cursor whose next page holds no row, and a 1,500-group
+   * `GROUP BY` answers 1,000 rows and no cursor, so the cut carries no sign at all.
+   */
+  readonly sqlResultLimit: string | null;
+}
+
+/**
+ * A DELETE in a product's SQL grammar that a cluster setting turns on, and how the plugin answers it while it is off.
+ */
+interface SqlDeleteSwitch {
+  /** The cluster setting, by its dotted name. */
+  readonly setting: string;
+  /** Each measured refusal of a DELETE while it is off: the fault name, and the exact detail for the statement sent. */
+  readonly refusals: readonly { readonly type: string; readonly details: (statement: string) => string }[];
 }
 
 /**
@@ -556,6 +635,10 @@ const DIALECTS: Readonly<Record<SearchDialectId, SearchDialectSpec>> = Object.fr
     },
     // Not needed: every grammar rejection measured here is `parsing_exception`.
     syntaxTypePattern: null,
+    boundedFetchSize: true,
+    // The grammar has no DELETE at all: every one sent raw is a `parsing_exception` (9.1.4).
+    sqlDelete: null,
+    sqlResultLimit: null,
   },
   opensearch: {
     label: "OpenSearch",
@@ -577,8 +660,8 @@ const DIALECTS: Readonly<Record<SearchDialectId, SearchDialectSpec>> = Object.fr
      *   DELETE, SHOW or DESCRIBE: ...". Note the ASYMMETRY this creates with
      *   Elasticsearch, which is not papered over: a mistyped leading keyword is
      *   `syntax` there and `unsupported` here, because that is what each engine
-     *   claims about it. DELETE landing here also confirms the seam's note that
-     *   OpenSearch's DELETE support is off by default.
+     *   claims about it. DELETE lands here on 3.8.0, whatever is attempted;
+     *   see `sqlDelete` below for the setting older releases hold it behind.
      * - `SELECT * FROM nope_missing` -> `IndexNotFoundException`, HTTP 404.
      * - `GET /nope_missing/_mapping` -> `index_not_found_exception`, HTTP 404, in
      *   snake_case. Measured, and worth stating plainly: OpenSearch's SQL PLUGIN
@@ -611,6 +694,30 @@ const DIALECTS: Readonly<Record<SearchDialectId, SearchDialectSpec>> = Object.fr
      * a user hits it rather than reported as an engine fault.
      */
     syntaxTypePattern: /ParserException$/,
+    boundedFetchSize: false,
+    /**
+     * Measured with `DELETE FROM` a name no index holds, on stock nodes (tests/fixtures/opensearch/):
+     * - 3.8.0: `SQLFeatureNotSupportedException`, "Query must start with SELECT, DELETE, SHOW or DESCRIBE:
+     *   <statement>", the same answer INSERT gets. Its dispatcher has no DELETE branch left, and the setting is not
+     *   recognized (`settings_exception`), so this is the answer whatever is attempted.
+     * - 2.19.4 with the setting off (its default): `SQLFeatureDisabledException`, the sentence below. With it on, the
+     *   same DELETE answers HTTP 200 with an `IndexNotFoundException` body, and a DELETE on a real index deletes.
+     */
+    sqlResultLimit: "plugins.query.size_limit",
+    sqlDelete: {
+      setting: "plugins.sql.delete.enabled",
+      refusals: [
+        {
+          type: "SQLFeatureNotSupportedException",
+          details: (statement: string) => `Query must start with SELECT, DELETE, SHOW or DESCRIBE: ${statement}`,
+        },
+        {
+          type: "SQLFeatureDisabledException",
+          details: () =>
+            "DELETE clause is disabled by default and will be deprecated. Using the plugins.sql.delete.enabled setting to enable it",
+        },
+      ],
+    },
   },
 });
 
@@ -953,6 +1060,53 @@ function responseFailure(spec: SearchDialectSpec, status: number, text: string):
  * image, Node in the published package), so reading only one place would leave the
  * other runtime's users with a message that says nothing.
  */
+/** A statement whose cursor outlived {@link MAX_PAGES}: refused, after the cursor was closed. */
+function tooManyPages(spec: SearchDialectSpec): SearchTransportError {
+  return new SearchTransportError(
+    "engine",
+    `${spec.label} returned more result pages than this connection will follow (${MAX_PAGES}). ` +
+      `Narrow the statement - add a LIMIT or a tighter WHERE - so the result fits.`,
+  );
+}
+
+/** The bound the rows read so far are past, rows first, or null while they are inside both. */
+function outsideBounds(rows: number, bytes: number, bounds: SearchQueryBounds): SearchBoundsError | null {
+  if (rows > bounds.maxRows) return new SearchBoundsError("row", rows, bounds.maxRows);
+  if (bytes > bounds.maxBytes) return new SearchBoundsError("byte", bytes, bounds.maxBytes);
+  return null;
+}
+
+/** How much of a body may be read before it is abandoned, and the byte bound a refusal of it names. */
+interface BodyCap {
+  readonly cap: number;
+  readonly allowed: number;
+}
+
+/**
+ * A body read in chunks, counted in bytes, and abandoned at the first chunk that takes it past its cap: the reader is
+ * cancelled, which closes the exchange, so the rest of an oversized page is never pulled into memory. A body read
+ * whole is decoded once, so a character split across two chunks still decodes as one.
+ */
+async function readCappedText(response: Response, { cap, allowed }: BodyCap): Promise<string> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytesRead = 0;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- a stream is read one chunk at a time, each counted before the next.
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytesRead += value.byteLength;
+    if (bytesRead > cap) {
+      // oxlint-disable-next-line no-await-in-loop -- the read stops here; the loop does not continue past the cancel.
+      await reader.cancel();
+      throw new SearchBoundsError("byte", bytesRead, allowed);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 function requestFailure(spec: SearchDialectSpec, cause: unknown, signal?: AbortSignal): SearchTransportError {
   if (signal?.aborted === true) {
     const reason = signal.reason as { name?: unknown } | undefined;
@@ -1271,13 +1425,92 @@ export class SearchHttpTransport implements SearchTransport {
       // Close the cursor we are abandoning, then say so. Silence here would
       // reintroduce the exact defect this loop was written to remove.
       await this.closeCursor(cursor, signal);
-      throw new SearchTransportError(
-        "engine",
-        `${this.spec.label} returned more result pages than this connection will follow (${MAX_PAGES}). ` +
-          `Narrow the statement - add a LIMIT or a tighter WHERE - so the result fits.`,
-      );
+      throw tooManyPages(this.spec);
     }
 
+    return result;
+  }
+
+  /**
+   * One statement whose answer must stay within `bounds`, or be refused whole.
+   *
+   * The page size is one row past the row bound, clamped to {@link MAX_FETCH_SIZE}, so
+   * a plain `SELECT` that goes past the bound does so on its first page. A page may still
+   * hold fewer rows than asked while the cursor goes on (a `HAVING` filters a page of
+   * groups after the engine cut it), so the pages are followed, and every one is checked
+   * against both bounds before the next is asked for. The rows' bytes are counted as
+   * `measureResultBytes` would count the rows read so far: the JSON array of them.
+   *
+   * The cursor matters here more than in {@link query}: asking for a page size opens a
+   * search context on the cluster that only reading to the end, closing the cursor or the
+   * keep-alive expiring releases (measured on 9.1.4: `open_contexts` 1 while the cursor is
+   * held, 0 after `/_sql/close`). So a refusal closes the cursor it read before it throws, and
+   * a later page that fails (past its byte cap, an engine error, an unreadable page, a deadline
+   * or a cancel) closes the cursor the page before it left open, on a signal of its own, which
+   * releases the same context (measured on 9.1.4). A first page past its byte cap is abandoned
+   * before any cursor could be read, and that one context waits for the engine's own keep-alive.
+   */
+  public async queryBounded(sql: string, bounds: SearchQueryBounds, signal?: AbortSignal): Promise<SearchQueryResult> {
+    const url = this.url(this.spec.sqlPath, this.spec.sqlQuery);
+    const pageCap = bounds.maxBytes * 3 + PAGE_ENVELOPE_ALLOWANCE;
+    const readPage = async (body: Record<string, unknown>, what: string): Promise<Record<string, unknown>> => {
+      const read = await this.request(url, signal, JSON.stringify(body), undefined, parseRowsJson, {
+        cap: pageCap,
+        allowed: bounds.maxBytes,
+      });
+      const page = asRecord(read);
+      if (page === null) throw unreadableBody(this.spec, what);
+      return page;
+    };
+
+    const first = await readPage(
+      {
+        query: sql,
+        ...(this.spec.boundedFetchSize ? { [FETCH_SIZE_FIELD]: Math.min(bounds.maxRows + 1, MAX_FETCH_SIZE) } : {}),
+        ...(this.spec.fieldMultiValueLeniency ? { field_multi_value_leniency: true } : {}),
+      },
+      "a SQL result",
+    );
+    const result = toQueryResult(this.spec, first);
+    let cursor = textField(first, CURSOR_FIELD);
+    // `[` and `]`, and one comma between each two rows: what JSON.stringify(rows) adds to the rows.
+    let bytes =
+      2 + result.rows.reduce((sum, row) => sum + measureRowBytes(row), 0) + Math.max(result.rows.length - 1, 0);
+    let pages = 1;
+
+    for (;;) {
+      const outside = outsideBounds(result.rows.length, bytes, bounds);
+      if (outside !== null) {
+        // oxlint-disable-next-line no-await-in-loop -- the loop ends here: the cursor is closed, then the refusal thrown.
+        if (cursor !== null && cursor !== "") await this.closeCursor(cursor, signal);
+        throw outside;
+      }
+      if (cursor === null || cursor === "" || pages >= MAX_PAGES) break;
+
+      let next: Record<string, unknown>;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- each page is asked for only after the one before it was checked.
+        next = await readPage({ cursor }, "a SQL result page");
+      } catch (error) {
+        // The page before this one left its cursor open, and closing it releases the search context (measured on
+        // 9.1.4: the context a later page still holds goes back to 0). The caller's signal may be the one that ended
+        // this read, so the close goes out on a signal of its own.
+        // oxlint-disable-next-line no-await-in-loop -- the loop ends here: the cursor is closed, then the failure thrown.
+        await this.closeCursor(cursor, AbortSignal.timeout(CURSOR_CLOSE_MS));
+        throw error;
+      }
+      for (const row of rebuildRows(this.spec, next, result.fieldNames)) {
+        bytes += measureRowBytes(row) + (result.rows.length > 0 ? 1 : 0);
+        result.rows.push(row);
+      }
+      cursor = textField(next, CURSOR_FIELD);
+      pages += 1;
+    }
+
+    if (cursor !== null && cursor !== "") {
+      await this.closeCursor(cursor, signal);
+      throw tooManyPages(this.spec);
+    }
     return result;
   }
 
@@ -1305,6 +1538,72 @@ export class SearchHttpTransport implements SearchTransport {
       version: textField(version, VERSION_FIELDS.NUMBER) ?? "",
       product: textField(version, VERSION_FIELDS.DISTRIBUTION) ?? UNDISTRIBUTED_PRODUCT,
     };
+  }
+
+  public async sqlDeleteSetting(signal?: AbortSignal): Promise<{ setting: string; enabled: boolean | null }> {
+    const { setting } = this.sqlDeleteSwitch();
+    const value = await this.clusterSetting(setting, signal);
+    if (value === undefined) return { setting, enabled: null };
+    if (value === true || value === "true") return { setting, enabled: true };
+    if (value === false || value === "false") return { setting, enabled: false };
+    throw unreadableBody(this.spec, `the ${setting} setting`);
+  }
+
+  public async sqlResultLimit(signal?: AbortSignal): Promise<{ setting: string; rows: number }> {
+    const setting = this.spec.sqlResultLimit;
+    if (setting === null) {
+      throw new SearchTransportError("unsupported", `${this.spec.label} SQL declares no result limit setting`);
+    }
+    const value = await this.clusterSetting(setting, signal);
+    const rows = typeof value === "number" || typeof value === "string" ? Number(value) : Number.NaN;
+    if (!Number.isSafeInteger(rows) || rows < 1) throw unreadableBody(this.spec, `the ${setting} setting`);
+    return { setting, rows };
+  }
+
+  /**
+   * One cluster setting's effective value, or undefined when the server does not recognize it. A setting set at one
+   * level hides the levels below it, and the answer lists only the levels that hold it, so an empty answer is a
+   * setting the server does not know.
+   */
+  private async clusterSetting(setting: string, signal?: AbortSignal): Promise<unknown> {
+    const answer = asRecord(
+      await this.request(this.url(CLUSTER_SETTINGS_PATH, `include_defaults=true&filter_path=*.${setting}`), signal),
+    );
+    if (answer === null) throw unreadableBody(this.spec, `the ${setting} setting`);
+    const level = SETTING_LEVELS.find((name) => answer[name] !== undefined);
+    if (level === undefined) return undefined;
+    let value: unknown = answer[level];
+    for (const key of setting.split(".")) value = asRecord(value)?.[key];
+    if (value === undefined) throw unreadableBody(this.spec, `the ${setting} setting`);
+    return value;
+  }
+
+  public async unrefusedSqlDelete(signal?: AbortSignal): Promise<string | null> {
+    const deletion = this.sqlDeleteSwitch();
+    const statement = `DELETE FROM ${DELETE_PROBE_PREFIX}${crypto.randomUUID().replaceAll("-", "")}`;
+    let answer: unknown;
+    try {
+      answer = await this.request(
+        this.url(this.spec.sqlPath, this.spec.sqlQuery),
+        signal,
+        JSON.stringify({ query: statement }),
+      );
+    } catch (error) {
+      if (!(error instanceof SearchTransportError) || REQUEST_REFUSALS.has(error.category)) throw error;
+      const refused = deletion.refusals.some(
+        (refusal) => refusal.type === error.engineType && refusal.details(statement) === error.message,
+      );
+      return refused ? null : `${error.engineType ?? error.category}: ${error.message}`;
+    }
+    return JSON.stringify(answer);
+  }
+
+  /** The product's DELETE switch, or a refusal before any request where its grammar holds none. */
+  private sqlDeleteSwitch(): SqlDeleteSwitch {
+    if (this.spec.sqlDelete === null) {
+      throw new SearchTransportError("unsupported", `${this.spec.label} SQL holds no DELETE behind a setting`);
+    }
+    return this.spec.sqlDelete;
   }
 
   public async indices(signal?: AbortSignal): Promise<SearchIndexInfo[]> {
@@ -1571,6 +1870,8 @@ export class SearchHttpTransport implements SearchTransport {
     absence?: AbsenceRule,
     /** How a successful body is read; {@link parseRowsJson} for the bodies that carry row values. */
     parse: (text: string) => unknown = parseJson,
+    /** Read the body no further than this; a bounded statement's pages alone pass one. */
+    bodyCap?: BodyCap,
   ): Promise<unknown> {
     let response: Response;
     let text: string;
@@ -1589,9 +1890,9 @@ export class SearchHttpTransport implements SearchTransport {
         redirect: "manual",
         ...(signal ? { signal } : {}),
       });
-      text = await response.text();
+      text = bodyCap === undefined ? await response.text() : await readCappedText(response, bodyCap);
     } catch (error) {
-      if (error instanceof DatabaseConfigError) throw error;
+      if (error instanceof DatabaseConfigError || error instanceof SearchBoundsError) throw error;
       // A refused socket, an unresolvable host, an abort and a truncated body all
       // arrive here, and all have to leave as the seam's own error type.
       throw requestFailure(this.spec, error, signal);
@@ -1608,6 +1909,17 @@ export class SearchHttpTransport implements SearchTransport {
     }
     if (!response.ok) throw responseFailure(this.spec, response.status, text);
 
-    return parse(text);
+    // A 2xx can still carry a refusal: OpenSearch's SQL plugin answers some with HTTP 200, its error envelope and the
+    // refusal's own status in the body (measured on 3.8.0: `DESCRIBE TABLES LIKE %` by a user missing
+    // `indices:admin/get` on an index it names, `OpenSearchSecurityException` with `"status": 403`; on 2.19.4, a
+    // DELETE on a missing index with the delete setting on, `IndexNotFoundException` with `"status": 404`). Read as a
+    // success, the envelope would be an answer with no rows.
+    const parsed = parse(text);
+    const answer = asRecord(parsed);
+    const status = answer?.[ERROR_FIELDS.STATUS];
+    if (asRecord(answer?.[ERROR_FIELDS.ENVELOPE]) !== null && typeof status === "number" && status >= 400) {
+      throw responseFailure(this.spec, status, text);
+    }
+    return parsed;
   }
 }

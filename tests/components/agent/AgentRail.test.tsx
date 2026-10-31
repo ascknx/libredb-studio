@@ -195,8 +195,8 @@ const DEFAULT_PROPS = {
  */
 const ENGINE_POSTURE_BODY = agentPosture({
   mode: "agent",
-  engine: "libredb",
-  engineLabel: getDBConfig("libredb").label,
+  engine: "sparkplug",
+  engineLabel: getDBConfig("sparkplug").label,
   handover: false,
 }).body;
 
@@ -1173,7 +1173,12 @@ describe("AgentRail", () => {
     // connection the server has never heard of: the seed exists on the server, it is
     // the local settings that do not. So the caveat may not
     // claim the agent reaches managed connections only — it does not.
-    expect(caveat).toContain("this browser");
+    // Nor may it say the settings live in this browser: with STORAGE_PROVIDER=sqlite or
+    // postgres a connection typed into the UI is stored on the server, and it is still
+    // refused, because a run resolves only the connections the server lists itself.
+    expect(caveat).toContain("a connection the server lists itself");
+    expect(caveat).toContain("matches the copy the server holds");
+    expect(caveat).not.toContain("this browser");
     expect(caveat).not.toContain("managed connections only");
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -4114,7 +4119,7 @@ describe("AgentRail", () => {
     describe("the hand-over follows the connection's statement language", () => {
       test("an engine with no statement language reaches no consent step", async () => {
         const fetchMock = mockAgentFetch([OPENED_LINE, STARTED_LINE]);
-        const view = analyze({ connectionType: "cassandra" });
+        const view = analyze({ connectionType: "trino" });
         fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "sales by region" } });
         await act(async () => {
           fireEvent.click(view.getByTestId("agent-start"));
@@ -5929,11 +5934,11 @@ describe("AgentRail", () => {
       });
 
       test("agent mode on an engine it cannot execute on says so, and plan mode is offered", () => {
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
         fireEvent.click(view.getByTestId("agent-mode-agent"));
 
         expect(view.getByTestId("agent-safety-strip").getAttribute("data-tone")).toBe("blocked");
-        expect(view.getByTestId("agent-safety-headline").textContent).toContain("Cassandra");
+        expect(view.getByTestId("agent-safety-headline").textContent).toContain("Trino");
         expect(view.getByTestId("agent-safety-qualifier").textContent).toContain("plan mode drafts here");
       });
 
@@ -6191,11 +6196,11 @@ describe("AgentRail", () => {
 
     describe("the engine notice", () => {
       test("agent mode on an engine with no read-only statement path is told, before Start", () => {
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
         fireEvent.click(view.getByTestId("agent-mode-agent"));
 
         const notice = view.getByTestId("agent-engine-unsupported-notice").textContent ?? "";
-        expect(notice).toContain("Cassandra");
+        expect(notice).toContain("Trino");
         expect(notice).toContain("no read-only statement path");
         // The two things that ARE open here, because a dead end is not what this is:
         // the operations workflow sends no statement at all, and plan mode drafts.
@@ -6204,7 +6209,7 @@ describe("AgentRail", () => {
       });
 
       test("it does not gate Start, because the refusal is the server's and one workflow is unaffected", () => {
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
         fireEvent.click(view.getByTestId("agent-mode-agent"));
         fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "what is blocked right now" } });
 
@@ -6215,7 +6220,7 @@ describe("AgentRail", () => {
       test("its way out selects plan mode and starts nothing", () => {
         const fetchMock = mock(async () => jsonResponse({}, 202));
         globalThis.fetch = fetchMock as unknown as typeof fetch;
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
         fireEvent.click(view.getByTestId("agent-mode-agent"));
 
         fireEvent.click(view.getByTestId("agent-engine-unsupported-plan"));
@@ -6250,7 +6255,7 @@ describe("AgentRail", () => {
       */
       test("its facts are the selection's, even while another run is describing the strip", async () => {
         mockAgentFetch([OPENED_LINE, STARTED_LINE]);
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
         fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "what is slow" } });
         await act(async () => {
           fireEvent.click(view.getByTestId("agent-start"));
@@ -6261,13 +6266,13 @@ describe("AgentRail", () => {
 
         const notice = view.getByTestId("agent-engine-unsupported-notice").textContent ?? "";
         expect(notice).toContain("no read-only statement path");
-        expect(view.getByTestId("agent-engine-unsupported-reason").textContent).toContain("On Apache Cassandra");
+        expect(view.getByTestId("agent-engine-unsupported-reason").textContent).toContain("On Trino");
         // The open plan run is still what the strip describes.
         expect(view.getByTestId("agent-safety-strip").getAttribute("data-tone")).toBe("safe");
       });
 
       test("plan mode is warned about nothing, on any engine", () => {
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="cassandra" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="trino" />);
 
         expect(view.queryByTestId("agent-engine-unsupported-notice")).toBeNull();
       });
@@ -6304,7 +6309,7 @@ describe("AgentRail", () => {
 
       async function refusedStart(startBody: unknown): Promise<RenderResult> {
         globalThis.fetch = mock(async () => jsonResponse(startBody, 400)) as unknown as typeof fetch;
-        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="libredb" />);
+        const view = render(<AgentRail {...DEFAULT_PROPS} connectionType="sparkplug" />);
         fireEvent.click(view.getByTestId("agent-mode-agent"));
         fireEvent.change(view.getByTestId("agent-objective"), { target: { value: "why is checkout slow" } });
         await act(async () => {
@@ -7082,8 +7087,8 @@ describe("a seed configuration the server could not read (B37)", () => {
   });
 
   // The control arm. A server that legitimately serves NO seeds is answering, and the
-  // original sentence is the true one there: this copy exists in this browser and
-  // nowhere else. Without this test the fix could turn every empty list into a false
+  // original sentence is the true one there: the server lists no connection this copy
+  // could be rebuilt from. Without this test the fix could turn every empty list into a false
   // alarm about a configuration that is fine.
   test("a server that legitimately serves no seeds still gets the original sentence", async () => {
     const { view, seeds, resolved } = await railAfterManaged({ json: { connections: [] } });
@@ -7093,7 +7098,7 @@ describe("a seed configuration the server could not read (B37)", () => {
 
     const caveat = view.getByTestId("agent-unresolvable-connection").textContent ?? "";
     expect(caveat).toContain("Sample (Employees)");
-    expect(caveat).toContain("this browser");
+    expect(caveat).toContain("a connection the server lists itself");
     expect(view.queryByTestId("agent-seed-config-unreadable")).toBeNull();
     expect((view.getByTestId("agent-start") as HTMLButtonElement).disabled).toBe(true);
   });

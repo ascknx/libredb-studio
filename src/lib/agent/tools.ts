@@ -70,6 +70,7 @@ import {
   PoolExhaustedError,
   QueryError,
   ReadAllowanceExceededError,
+  RefusedBeforeSendError,
   TimeoutError,
 } from "@/lib/db/errors";
 import type { ExecutionArtifactStore } from "@/lib/db/operations/artifacts";
@@ -83,6 +84,7 @@ import {
 import { actorLabel, executeAuditedOperation } from "@/lib/db/operations/execution";
 import type { ExecutionActor, ExecutionPolicy, PolicyDenyCode, TargetScope } from "@/lib/db/operations/policy";
 import type { OperationRegistry } from "@/lib/db/operations/registry";
+import { admitComposedStatement, type ComposedStatementAdmission } from "@/lib/db/operations/statement-guard";
 import type {
   Container,
   DatabaseObject,
@@ -90,6 +92,7 @@ import type {
   DatabaseProvider,
   ObjectDetail,
   ObjectKindSpec,
+  ObjectReadOptions,
   ProviderCapabilities,
   ProviderLabels,
   ReadOnlyStatementBudget,
@@ -142,11 +145,18 @@ import { offersRefusalExamples } from "./models";
 import type { ColumnSchema, DatabaseConnection, QueryResult } from "@/lib/types";
 import { type ProfileTargetResolution, type ResolvedProfileTarget, resolveProfileTarget } from "./inventory-address";
 import { addressableObjects } from "./inventory-objects";
-import type { AgentInventory, AgentInventoryObject, AgentUnlistedParent, AgentUnlistedParentsNotNamed } from "./types";
+import type {
+  AgentInventory,
+  AgentInventoryKind,
+  AgentInventoryObject,
+  AgentUnlistedParent,
+  AgentUnlistedParentsNotNamed,
+} from "./types";
 import { composeCatalogRead, composeEstimatingExplain, composeStatisticsAvailabilityProbe } from "./composed-sql";
 import {
   type AgentCatalogKind,
   type AgentCatalogRead,
+  type AgentCatalogRows,
   AgentComposedSqlError,
   type AgentEstimatingExplain,
 } from "./composed-sql-primitives";
@@ -587,6 +597,17 @@ export interface AgentOperationRequest {
    * and still refused by the same policy — and the model is still handed no tools.
    */
   readonly grounding?: boolean;
+  /**
+   * The engine's answer turned into the rows the call reads as, before the run keeps it: only the catalog read sets
+   * it, from its engine's row mapper (`AgentCatalogRead.mapRows`). Absent keeps the answer as the engine gave it.
+   */
+  readonly mapRows?: (rows: readonly Record<string, unknown>[]) => AgentCatalogRows;
+  /**
+   * The admission of the one statement the catalog read composed, for an engine whose catalog statement is a command
+   * (`AgentCatalogRead.commandShaped`): the fence admits that statement, word for word, past its read-keyword allowlist.
+   * Only the catalog read sets it, and a statement other than the one it was minted for meets the fence unchanged.
+   */
+  readonly composed?: ComposedStatementAdmission;
 }
 
 // ============================================================================
@@ -1426,13 +1447,36 @@ export async function executeAgentOperation(
     // are the same call however the model worded its way to them.
     fingerprintSource: request.sql,
     fingerprintLanguage: statementFamilyOf(context.statementLanguage),
-    input: { [argument]: request.sql },
+    ...(request.composed === undefined ? {} : { composedByServer: true }),
+    input: { [argument]: request.sql, ...(request.composed === undefined ? {} : { composed: request.composed }) },
     ...(request.label === undefined ? {} : { label: request.label }),
     ...(request.target === undefined ? {} : { target: request.target }),
     ...(request.grounding === undefined ? {} : { grounding: request.grounding }),
-    invoke: (validatedInput, budget, phase) =>
-      runStatement(context, validatedInput, budget, phase, argument, request.mode),
+    invoke: (validatedInput, budget, phase) => {
+      const answered = runStatement(context, validatedInput, budget, phase, argument, request.mode);
+      const { mapRows } = request;
+      return mapRows === undefined ? answered : answered.then((result) => withMappedRows(result, mapRows));
+    },
   });
+}
+
+/** `result` with the rows `mapRows` turns its rows into, and the columns and the count those rows carry. */
+function withMappedRows(
+  result: QueryResult,
+  mapRows: (rows: readonly Record<string, unknown>[]) => AgentCatalogRows,
+): QueryResult {
+  const mapped = mapRows(result.rows);
+  return { ...result, rows: [...mapped.rows], fields: [...mapped.fields], rowCount: mapped.rows.length };
+}
+
+/** The row mapper of `dialect`'s catalog read for one kind, or undefined where its statement answers the rows itself. */
+function catalogRowMapper(
+  dialect: DatabaseConnection["type"],
+  kind: AgentCatalogKind,
+): ((rows: readonly Record<string, unknown>[]) => AgentCatalogRows) | undefined {
+  // Supplied: every caller has already composed this dialect's catalog statement, which refuses an unsupported one.
+  const { mapRows } = engineServerDialect(dialect).catalogRead as AgentCatalogRead;
+  return mapRows === undefined ? undefined : (rows) => mapRows(kind, rows);
 }
 
 /**
@@ -1454,6 +1498,12 @@ export interface AuditedAgentCall {
    * keeps the SQL fingerprint of its own `operations:...` or `objects:...` key, which is no statement in any language.
    */
   readonly fingerprintLanguage?: AgentStatementLanguageId;
+  /**
+   * Set when the call carries the server's admission of the statement it composed. The ledger then keys the call
+   * apart from every model statement, so a model's refused copy of the same text never blocks the server's own read,
+   * and the model's copy stays refused as before.
+   */
+  readonly composedByServer?: true;
   /** The input the DESCRIPTOR validates. `{sql}` or `{statement}` for a statement, the selector for a curated read. */
   readonly input: unknown;
   readonly label?: string;
@@ -1604,6 +1654,9 @@ function columnsThatExist(message: string, connection: DatabaseConnection): stri
 const READ_ALLOWANCE_ADVICE =
   "That read was refused by this server before it was sent; the database was not asked. This run cannot pay for a read that large: ask for a smaller one that fits what is left, or answer from what you have already read.";
 
+const REFUSED_BEFORE_SEND_ADVICE =
+  "That statement was refused by this server before it was sent; the database was not asked, so this is not a database error. Draft a statement that does not do what the refusal names, or answer from what you have already read.";
+
 function otherStatementAdvice(
   message: string,
   engine: string,
@@ -1615,6 +1668,14 @@ function otherStatementAdvice(
   return languageServerPack(language).catalogAdvice?.(message, engine);
 }
 
+/**
+ * The key `call` is held under in the run's repair ledger. A statement fingerprint is a bare digest, so the prefix puts
+ * a call carrying the server's admission where no model statement can land.
+ */
+function repairLedgerKey(call: AuditedAgentCall, statementFingerprint: string): string {
+  return call.composedByServer === true ? `composed:${statementFingerprint}` : statementFingerprint;
+}
+
 export async function runAuditedAgentCall(
   context: AgentToolContext,
   call: AuditedAgentCall,
@@ -1624,8 +1685,9 @@ export async function runAuditedAgentCall(
   // set, so no dispatch of a model's tool call ever arrives here with it.
   if (context.mode !== "agent" && call.grounding !== true) return unavailable("MODE_HAS_NO_TOOLS");
 
-  const fingerprint = languageServer(call.fingerprintLanguage ?? CURATED_CALL_LANGUAGE).fingerprint(
-    call.fingerprintSource,
+  const fingerprint = repairLedgerKey(
+    call,
+    languageServer(call.fingerprintLanguage ?? CURATED_CALL_LANGUAGE).fingerprint(call.fingerprintSource),
   );
   const repairAdmission = context.repairs.admit(fingerprint);
   if (!repairAdmission.admitted) return unavailable(repairAdmission.reasonCode);
@@ -1782,13 +1844,16 @@ export async function runAuditedAgentCall(
       So `columns` decides the cost, and the advice the model reads is still whichever of the three
       applies. `columnsThatExist` is computed once and used for both rather than called twice.
     */
-    // The run's read allowance refused this read before it was sent, so the sentence is this server's and the
-    // database never saw the statement: it is not fenced as the database's words, and its advice is the server's.
-    // It still costs a repair attempt, because the repair is a smaller read the model has to author.
-    const ownRefusal = error instanceof ReadAllowanceExceededError;
+    // This server refused the statement before it was sent (a provider's own fence, or the run's read allowance), so
+    // the sentence is this server's and the database never saw the statement: it is not fenced as the database's
+    // words, the refusal records it as not sent, and its advice is the server's. It still costs a repair attempt,
+    // because the repair is a statement the model has to author.
+    const ownRefusal = error instanceof RefusedBeforeSendError;
     const columns = ownRefusal ? undefined : columnsThatExist(error.message, context.connection);
     const advice = ownRefusal
-      ? READ_ALLOWANCE_ADVICE
+      ? error instanceof ReadAllowanceExceededError
+        ? READ_ALLOWANCE_ADVICE
+        : REFUSED_BEFORE_SEND_ADVICE
       : (columns ??
         otherStatementAdvice(
           error.message,
@@ -1813,6 +1878,7 @@ export async function runAuditedAgentCall(
         // this failure cost, and it depends on a process-wide cache a run cannot see. See the
         // field's own note in `types.ts`.
         answered,
+        ...(ownRefusal ? { sent: false as const } : {}),
       },
       // The engine's own words: untrusted, so fenced. The fingerprint stands in for
       // a correlation id, which a failed execution never produced.
@@ -2516,7 +2582,7 @@ export async function readObjectInventoryForGrounding(context: AgentToolContext)
         // no bound at all, which is the only worse answer.
         try {
           const walked = await withinGrantedTime(
-            walkObjectInventory(provider, context.capabilities, declared),
+            walkObjectInventory(provider, context.capabilities, declared, objectReadArguments(context)),
             budget.statementTimeoutMs,
             () => new AgentSchemaReadTimeout(budget.statementTimeoutMs),
           );
@@ -2582,9 +2648,23 @@ async function walkObjectInventory(
   provider: DatabaseProvider,
   capabilities: ProviderCapabilities,
   declared: readonly ObjectKindSpec[],
+  readArguments: readonly [ObjectReadOptions] | readonly [],
 ): Promise<{ readonly inventory: AgentInventory; readonly defaultContainer?: readonly string[] }> {
   const listObjects = provider.listObjects.bind(provider);
   const describeObjects = provider.describeObjects.bind(provider);
+
+  // Asked before any container (U189): a provider whose inventory is configuration the connection lacks lists no
+  // container, and that empty answer is no answer about what the engine holds. Every kind then carries the provider's
+  // sentence as `unavailable`, the note a refused kind already has, and `context-snapshot.ts` says nothing was listed.
+  const needs = await provider.inventoryNeedsConfiguration?.();
+  if (needs !== undefined) {
+    return {
+      inventory: {
+        objects: [],
+        kinds: declared.map((spec) => inventoryKind(spec, capabilities, { unavailable: needs })),
+      },
+    };
+  }
 
   // A provider that declares a walk scope is read in its session-default container and the ones it names; the
   // rest are counted, and a parent the scope reads nothing below whose listing failed is named, so the inventory
@@ -2609,7 +2689,7 @@ async function walkObjectInventory(
 
   let pairs = 0;
   for (const container of containers) {
-    const counts = await countForGrounding(provider, container);
+    const counts = await countForGrounding(provider, container, readArguments);
     for (const spec of applicableKinds(declared, kindsOf.get(JSON.stringify(container)))) {
       const count = Object.hasOwn(counts, spec.id) ? counts[spec.id] : undefined;
       if (count !== undefined && !isCountUnavailable(count) && count.count === 0) continue;
@@ -2636,7 +2716,7 @@ async function walkObjectInventory(
       }
       pairs += 1;
       const listed: DatabaseObject[] = [];
-      for (const object of await listObjects(container, spec.id)) {
+      for (const object of await listObjects(container, spec.id, ...readArguments)) {
         if (objects.length + listed.length >= INVENTORY_LIMIT) {
           // Overwrites a pair-limit reason where both bit, the same way the route resolves
           // it: the object limit is the one a reader can see reflected in what they hold.
@@ -2651,7 +2731,7 @@ async function walkObjectInventory(
       // round trip for an empty answer.
       let details: readonly ObjectDetail[] = [];
       if (listed.length > 0) {
-        const batch = await describeObjects(container, spec.id, listed.length);
+        const batch = await describeObjects(container, spec.id, listed.length, ...readArguments);
         details = batch.details;
         // The provider's own bound in the provider's own words. Reported even when the listing
         // fitted, because a complete list of objects whose columns were cut is still an
@@ -2690,20 +2770,14 @@ async function walkObjectInventory(
     if (truncated !== undefined) break;
   }
 
-  const kinds = declared.map((spec) => ({
-    id: spec.id,
-    role: spec.role,
-    label: spec.label,
-    labelPlural: spec.labelPlural,
-    ...(sampledFrom.has(spec.id) ? { sampledFrom: sampledFrom.get(spec.id) } : {}),
-    ...(unavailable.has(spec.id) ? { unavailable: unavailable.get(spec.id) } : {}),
-    ...(withheld.has(spec.id) ? { withheldCount: withheld.get(spec.id) } : {}),
-    ...(withheldUncounted.has(spec.id) ? { withheldUncounted: true as const } : {}),
-    // The refusal `tablesAreDerivedGroupings` carries is about the rows of the inventory,
-    // which are the relation kinds: a Redis Function Library is a named object and a Redis
-    // key pattern is not, and both are declared by the one provider that sets the flag.
-    ...(capabilities.tablesAreDerivedGroupings === true && spec.role === "relation" ? { derivedGroupings: true } : {}),
-  }));
+  const kinds = declared.map((spec) =>
+    inventoryKind(spec, capabilities, {
+      ...(sampledFrom.has(spec.id) ? { sampledFrom: sampledFrom.get(spec.id) } : {}),
+      ...(unavailable.has(spec.id) ? { unavailable: unavailable.get(spec.id) } : {}),
+      ...(withheld.has(spec.id) ? { withheldCount: withheld.get(spec.id) } : {}),
+      ...(withheldUncounted.has(spec.id) ? { withheldUncounted: true as const } : {}),
+    }),
+  );
 
   // The deepest level's words, because the scope keeps or skips containers at that level.
   const level = capabilities.containerLevels?.[containerDepth(capabilities) - 1];
@@ -2725,6 +2799,25 @@ async function walkObjectInventory(
       : {}),
   };
   return defaultContainer === undefined ? { inventory } : { inventory, defaultContainer };
+}
+
+/** What the inventory records of a declared kind: its declaration, what the walk read of it, and the derived mark. */
+function inventoryKind(
+  spec: ObjectKindSpec,
+  capabilities: ProviderCapabilities,
+  read: Omit<AgentInventoryKind, "id" | "role" | "label" | "labelPlural" | "derivedGroupings">,
+): AgentInventoryKind {
+  return {
+    id: spec.id,
+    role: spec.role,
+    label: spec.label,
+    labelPlural: spec.labelPlural,
+    ...read,
+    // The refusal `tablesAreDerivedGroupings` carries is about the rows of the inventory,
+    // which are the relation kinds: a Redis Function Library is a named object and a Redis
+    // key pattern is not, and both are declared by the one provider that sets the flag.
+    ...(capabilities.tablesAreDerivedGroupings === true && spec.role === "relation" ? { derivedGroupings: true } : {}),
+  };
 }
 
 /**
@@ -2842,9 +2935,19 @@ function unlistedReason(message: string): string {
 async function countForGrounding(
   provider: DatabaseProvider,
   container: readonly string[],
+  readArguments: readonly [ObjectReadOptions] | readonly [],
 ): Promise<Record<string, KindCount>> {
   const countObjects = provider.countObjects?.bind(provider);
-  return countObjects === undefined ? {} : await countObjects(container);
+  return countObjects === undefined ? {} : await countObjects(container, ...readArguments);
+}
+
+/**
+ * The trailing argument the walk hands each object read: the drive's billed-read allowance, so an engine that bills
+ * every read charges the grounding's listings to the run as it charges the run's statements. No argument at all when
+ * the context carries none, so a read outside a drive is called exactly as the editor's routes call it.
+ */
+function objectReadArguments(context: AgentToolContext): readonly [ObjectReadOptions] | readonly [] {
+  return context.readAllowance === undefined ? [] : [{ readAllowance: context.readAllowance }];
 }
 
 /**
@@ -2921,10 +3024,14 @@ export async function readStatisticsForGrounding(
       if (read.rows.length > budget.maxResultRows || JSON.stringify(read.rows).length > budget.maxResultBytes) {
         throw new AgentCuratedReadError("READING_OVER_BUDGET");
       }
+      // The estimates are a catalog kind, so they are kept as that kind's mapped rows, mapped once the engine's own
+      // answer is inside the budget, as on the read-only path; the probe is no catalog kind.
+      const mapRows = statement === "estimates" ? catalogRowMapper(dialect, "statistics") : undefined;
+      const kept = mapRows === undefined ? read : withMappedRows(read, mapRows);
       return {
-        rows: read.rows,
-        fields: read.fields,
-        rowCount: read.rows.length,
+        rows: kept.rows,
+        fields: kept.fields,
+        rowCount: kept.rows.length,
         executionTime: (context.clock?.() ?? Date.now()) - startedAtMs,
       };
     },
@@ -2956,12 +3063,19 @@ async function readCatalog(
     return composedSqlOutcome(error);
   }
   // Supplied: `composeCatalogRead` refuses an engine whose catalog read is unsupported.
-  const { declaredSchema, retry } = engineServerDialect(context.connection.type).catalogRead as AgentCatalogRead;
+  const { declaredSchema, retry, commandShaped } = engineServerDialect(context.connection.type)
+    .catalogRead as AgentCatalogRead;
+  const mapRows = catalogRowMapper(context.connection.type, selector.kind ?? "columns");
   const request: AgentOperationRequest = {
     operationId: "sql.query.read",
     sql,
     grounding,
     label: CATALOG_LABELS[selector.kind ?? "columns"],
+    ...(mapRows === undefined ? {} : { mapRows }),
+    // Minted here, right after composing, and only where the overlay declares its catalog statement a command: the
+    // fence then admits this one statement by identity, and a retry's rewrite, which is another statement, meets the
+    // fence unchanged.
+    ...(commandShaped === true ? { composed: admitComposedStatement(sql) } : {}),
     // Declared, so a scope carrying a schema allowlist bounds which schema may be
     // inspected. A raw read cannot declare its schema, which is why an allowlist
     // denies one, and it is not worked around here.
@@ -3005,7 +3119,9 @@ async function readCatalog(
   ) {
     const fallback = retry.rewrite(sql);
     if (fallback !== sql) {
-      outcome = await executeAgentOperation(context, { ...request, sql: fallback });
+      // The rewrite is another statement, so it goes without the admission minted for `sql`, which the fence would
+      // refuse on any other text.
+      outcome = await executeAgentOperation(context, { ...request, sql: fallback, composed: undefined });
     }
   }
   /*

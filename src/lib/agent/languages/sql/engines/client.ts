@@ -5,12 +5,19 @@
  * disagrees with its server overlay does not compile.
  */
 import type { ClientDialectOf } from "../../pack";
+import type { CASSANDRA_SERVER_OVERLAY } from "./cassandra";
 import type { CLICKHOUSE_SERVER_OVERLAY } from "./clickhouse";
+import type { COUCHBASE_SERVER_OVERLAY } from "./couchbase";
+import type { DB2_SERVER_OVERLAY } from "./db2";
+import type { DRUID_SERVER_OVERLAY } from "./druid";
 import type { DUCKDB_SERVER_OVERLAY } from "./duckdb";
+import type { ELASTICSEARCH_SERVER_OVERLAY } from "./elasticsearch";
 import type { INFLUXDB3_SERVER_OVERLAY } from "./influxdb3";
 import type { LIBSQL_SERVER_OVERLAY } from "./libsql";
 import type { MSSQL_SERVER_OVERLAY } from "./mssql";
 import type { MYSQL_SERVER_OVERLAY } from "./mysql";
+import type { OPENSEARCH_SERVER_OVERLAY } from "./opensearch";
+import type { ORACLE_SERVER_OVERLAY } from "./oracle";
 import type { POSTGRES_SERVER_OVERLAY } from "./postgres";
 import type { SQLITE_SERVER_OVERLAY } from "./sqlite";
 
@@ -70,3 +77,52 @@ export const INFLUXDB3_CLIENT_OVERLAY = {
     catalogCapture: "unsupported",
   } satisfies ClientDialectOf<(typeof INFLUXDB3_SERVER_OVERLAY)["dialect"]>),
 } as const satisfies { dialect: ClientDialectOf<(typeof INFLUXDB3_SERVER_OVERLAY)["dialect"]> };
+export const ELASTICSEARCH_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof ELASTICSEARCH_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof ELASTICSEARCH_SERVER_OVERLAY)["dialect"]> };
+export const OPENSEARCH_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof OPENSEARCH_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof OPENSEARCH_SERVER_OVERLAY)["dialect"]> };
+export const ORACLE_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof ORACLE_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof ORACLE_SERVER_OVERLAY)["dialect"]> };
+export const DB2_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof DB2_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof DB2_SERVER_OVERLAY)["dialect"]> };
+export const CASSANDRA_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof CASSANDRA_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof CASSANDRA_SERVER_OVERLAY)["dialect"]> };
+export const COUCHBASE_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof COUCHBASE_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof COUCHBASE_SERVER_OVERLAY)["dialect"]> };
+export const DRUID_CLIENT_OVERLAY = {
+  dialect: Object.freeze({
+    catalogRead: "supported",
+    planEstimate: "unsupported",
+    catalogCapture: "unsupported",
+  } satisfies ClientDialectOf<(typeof DRUID_SERVER_OVERLAY)["dialect"]>),
+} as const satisfies { dialect: ClientDialectOf<(typeof DRUID_SERVER_OVERLAY)["dialect"]> };

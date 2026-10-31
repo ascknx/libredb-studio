@@ -1341,149 +1341,101 @@
         "columns": [
           {
             "selector": {},
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", c.COLUMN_NAME AS \"column_name\", c.DATA_TYPE AS \"data_type\", c.NULLABLE AS \"is_nullable\", c.COLUMN_ID AS \"ordinal_position\" FROM SYS.ALL_TAB_COLUMNS c WHERE c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID"
           },
           {
             "selector": {
               "schema": "Sales"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", c.COLUMN_NAME AS \"column_name\", c.DATA_TYPE AS \"data_type\", c.NULLABLE AS \"is_nullable\", c.COLUMN_ID AS \"ordinal_position\" FROM SYS.ALL_TAB_COLUMNS c WHERE c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'Sales' ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID"
           },
           {
             "selector": {
               "schema": "MAIN"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", c.COLUMN_NAME AS \"column_name\", c.DATA_TYPE AS \"data_type\", c.NULLABLE AS \"is_nullable\", c.COLUMN_ID AS \"ordinal_position\" FROM SYS.ALL_TAB_COLUMNS c WHERE c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'MAIN' ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID"
           },
           {
             "selector": {
               "schema": "public",
               "table": "orders"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", c.COLUMN_NAME AS \"column_name\", c.DATA_TYPE AS \"data_type\", c.NULLABLE AS \"is_nullable\", c.COLUMN_ID AS \"ordinal_position\" FROM SYS.ALL_TAB_COLUMNS c WHERE c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'public' AND c.TABLE_NAME = 'orders' ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID"
           }
         ],
         "relations": [
           {
             "selector": {},
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", cc.COLUMN_NAME AS \"column_name\", r.OWNER AS \"referenced_schema\", r.TABLE_NAME AS \"referenced_table\", rc.COLUMN_NAME AS \"referenced_column\" FROM SYS.ALL_CONSTRAINTS c JOIN SYS.ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN SYS.ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME JOIN SYS.ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION"
           },
           {
             "selector": {
               "schema": "Sales"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", cc.COLUMN_NAME AS \"column_name\", r.OWNER AS \"referenced_schema\", r.TABLE_NAME AS \"referenced_table\", rc.COLUMN_NAME AS \"referenced_column\" FROM SYS.ALL_CONSTRAINTS c JOIN SYS.ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN SYS.ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME JOIN SYS.ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'Sales' ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION"
           },
           {
             "selector": {
               "schema": "MAIN"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", cc.COLUMN_NAME AS \"column_name\", r.OWNER AS \"referenced_schema\", r.TABLE_NAME AS \"referenced_table\", rc.COLUMN_NAME AS \"referenced_column\" FROM SYS.ALL_CONSTRAINTS c JOIN SYS.ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN SYS.ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME JOIN SYS.ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'MAIN' ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION"
           },
           {
             "selector": {
               "schema": "public",
               "table": "orders"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT c.OWNER AS \"table_schema\", c.TABLE_NAME AS \"table_name\", cc.COLUMN_NAME AS \"column_name\", r.OWNER AS \"referenced_schema\", r.TABLE_NAME AS \"referenced_table\", rc.COLUMN_NAME AS \"referenced_column\" FROM SYS.ALL_CONSTRAINTS c JOIN SYS.ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME JOIN SYS.ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME JOIN SYS.ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND c.OWNER = 'public' AND c.TABLE_NAME = 'orders' ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION"
           }
         ],
         "indexes": [
           {
             "selector": {},
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT i.TABLE_OWNER AS \"table_schema\", i.TABLE_NAME AS \"table_name\", i.INDEX_NAME AS \"index_name\", CASE WHEN i.UNIQUENESS = 'UNIQUE' THEN 'YES' ELSE 'NO' END AS \"is_unique\", CASE WHEN EXISTS (SELECT 1 FROM SYS.ALL_CONSTRAINTS k WHERE k.CONSTRAINT_TYPE = 'P' AND k.OWNER = i.TABLE_OWNER AND k.TABLE_NAME = i.TABLE_NAME AND k.INDEX_NAME = i.INDEX_NAME) THEN 'YES' ELSE 'NO' END AS \"is_primary\", ic.COLUMN_NAME AS \"column_name\" FROM SYS.ALL_INDEXES i JOIN SYS.ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME WHERE i.TABLE_OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') ORDER BY i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION"
           },
           {
             "selector": {
               "schema": "Sales"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT i.TABLE_OWNER AS \"table_schema\", i.TABLE_NAME AS \"table_name\", i.INDEX_NAME AS \"index_name\", CASE WHEN i.UNIQUENESS = 'UNIQUE' THEN 'YES' ELSE 'NO' END AS \"is_unique\", CASE WHEN EXISTS (SELECT 1 FROM SYS.ALL_CONSTRAINTS k WHERE k.CONSTRAINT_TYPE = 'P' AND k.OWNER = i.TABLE_OWNER AND k.TABLE_NAME = i.TABLE_NAME AND k.INDEX_NAME = i.INDEX_NAME) THEN 'YES' ELSE 'NO' END AS \"is_primary\", ic.COLUMN_NAME AS \"column_name\" FROM SYS.ALL_INDEXES i JOIN SYS.ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME WHERE i.TABLE_OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND i.TABLE_OWNER = 'Sales' ORDER BY i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION"
           },
           {
             "selector": {
               "schema": "MAIN"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT i.TABLE_OWNER AS \"table_schema\", i.TABLE_NAME AS \"table_name\", i.INDEX_NAME AS \"index_name\", CASE WHEN i.UNIQUENESS = 'UNIQUE' THEN 'YES' ELSE 'NO' END AS \"is_unique\", CASE WHEN EXISTS (SELECT 1 FROM SYS.ALL_CONSTRAINTS k WHERE k.CONSTRAINT_TYPE = 'P' AND k.OWNER = i.TABLE_OWNER AND k.TABLE_NAME = i.TABLE_NAME AND k.INDEX_NAME = i.INDEX_NAME) THEN 'YES' ELSE 'NO' END AS \"is_primary\", ic.COLUMN_NAME AS \"column_name\" FROM SYS.ALL_INDEXES i JOIN SYS.ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME WHERE i.TABLE_OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND i.TABLE_OWNER = 'MAIN' ORDER BY i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION"
           },
           {
             "selector": {
               "schema": "public",
               "table": "orders"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT i.TABLE_OWNER AS \"table_schema\", i.TABLE_NAME AS \"table_name\", i.INDEX_NAME AS \"index_name\", CASE WHEN i.UNIQUENESS = 'UNIQUE' THEN 'YES' ELSE 'NO' END AS \"is_unique\", CASE WHEN EXISTS (SELECT 1 FROM SYS.ALL_CONSTRAINTS k WHERE k.CONSTRAINT_TYPE = 'P' AND k.OWNER = i.TABLE_OWNER AND k.TABLE_NAME = i.TABLE_NAME AND k.INDEX_NAME = i.INDEX_NAME) THEN 'YES' ELSE 'NO' END AS \"is_primary\", ic.COLUMN_NAME AS \"column_name\" FROM SYS.ALL_INDEXES i JOIN SYS.ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME WHERE i.TABLE_OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND i.TABLE_OWNER = 'public' AND i.TABLE_NAME = 'orders' ORDER BY i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION"
           }
         ],
         "statistics": [
           {
             "selector": {},
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT t.OWNER AS \"table_schema\", t.TABLE_NAME AS \"table_name\", t.NUM_ROWS AS \"estimated_rows\" FROM SYS.ALL_TABLES t WHERE t.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') ORDER BY t.OWNER, t.TABLE_NAME"
           },
           {
             "selector": {
               "schema": "Sales"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT t.OWNER AS \"table_schema\", t.TABLE_NAME AS \"table_name\", t.NUM_ROWS AS \"estimated_rows\" FROM SYS.ALL_TABLES t WHERE t.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND t.OWNER = 'Sales' ORDER BY t.OWNER, t.TABLE_NAME"
           },
           {
             "selector": {
               "schema": "MAIN"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT t.OWNER AS \"table_schema\", t.TABLE_NAME AS \"table_name\", t.NUM_ROWS AS \"estimated_rows\" FROM SYS.ALL_TABLES t WHERE t.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND t.OWNER = 'MAIN' ORDER BY t.OWNER, t.TABLE_NAME"
           },
           {
             "selector": {
               "schema": "public",
               "table": "orders"
             },
-            "sql": {
-              "reasonCode": "UNSUPPORTED_DIALECT",
-              "message": "no verified catalog composition for provider type \"oracle\""
-            }
+            "sql": "SELECT t.OWNER AS \"table_schema\", t.TABLE_NAME AS \"table_name\", t.NUM_ROWS AS \"estimated_rows\" FROM SYS.ALL_TABLES t WHERE t.OWNER NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y') AND t.OWNER = 'public' AND t.TABLE_NAME = 'orders' ORDER BY t.OWNER, t.TABLE_NAME"
           }
         ]
       },
@@ -1538,10 +1490,7 @@
           }
         }
       ],
-      "statisticsAvailabilityProbe": {
-        "reasonCode": "UNSUPPORTED_DIALECT",
-        "message": "no verified statistics composition for provider type \"oracle\""
-      },
+      "statisticsAvailabilityProbe": null,
       "tableProfile": {
         "basic": {
           "reasonCode": "UNSUPPORTED_DIALECT",
@@ -2162,6 +2111,452 @@
         "noSegments": {
           "reasonCode": "UNSUPPORTED_DIALECT",
           "message": "no verified profile composition for provider type \"influxdb3\""
+        }
+      }
+    },
+    "elasticsearch": {
+      "catalogRead": {
+        "columns": [
+          {
+            "selector": {},
+            "sql": "SYS COLUMNS"
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch SQL has no schema to narrow by, so name a table instead"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch SQL has no schema to narrow by, so name a table instead"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch SQL has no schema to narrow by, so name a table instead"
+            }
+          }
+        ],
+        "relations": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no foreign key, so there is no such inventory to read"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          }
+        ],
+        "statistics": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "Elasticsearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          }
+        ]
+      },
+      "estimatingExplain": [
+        {
+          "sql": "SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "  explain select 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN QUERY PLAN SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN (FORMAT JSON) SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN FORMAT=JSON SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN ANALYZE SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"elasticsearch\""
+          }
+        },
+        {
+          "sql": "",
+          "composed": {
+            "reasonCode": "INVALID_STATEMENT",
+            "message": "there is no statement to explain"
+          }
+        }
+      ],
+      "statisticsAvailabilityProbe": null,
+      "tableProfile": {
+        "basic": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"elasticsearch\""
+        },
+        "distribution": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"elasticsearch\""
+        },
+        "pattern": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"elasticsearch\""
+        },
+        "noColumns": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"elasticsearch\""
+        },
+        "noSegments": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"elasticsearch\""
+        }
+      }
+    },
+    "opensearch": {
+      "catalogRead": {
+        "columns": [
+          {
+            "selector": {},
+            "sql": "DESCRIBE TABLES LIKE %"
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch SQL has no schema to narrow by, so name a table instead"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch SQL has no schema to narrow by, so name a table instead"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch SQL has no schema to narrow by, so name a table instead"
+            }
+          }
+        ],
+        "relations": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no foreign key, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no foreign key, so there is no such inventory to read"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no index object apart from the table itself, so there is no such inventory to read"
+            }
+          }
+        ],
+        "statistics": [
+          {
+            "selector": {},
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "Sales"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "MAIN"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          },
+          {
+            "selector": {
+              "schema": "public",
+              "table": "orders"
+            },
+            "sql": {
+              "reasonCode": "SELECTOR_UNSUPPORTED_BY_DIALECT",
+              "message": "OpenSearch keeps no row estimate a catalog command reads, so there is no such inventory to read"
+            }
+          }
+        ]
+      },
+      "estimatingExplain": [
+        {
+          "sql": "SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "  explain select 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN QUERY PLAN SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN (FORMAT JSON) SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN FORMAT=JSON SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "EXPLAIN ANALYZE SELECT 1",
+          "composed": {
+            "reasonCode": "UNSUPPORTED_DIALECT",
+            "message": "no verified estimating EXPLAIN for provider type \"opensearch\""
+          }
+        },
+        {
+          "sql": "",
+          "composed": {
+            "reasonCode": "INVALID_STATEMENT",
+            "message": "there is no statement to explain"
+          }
+        }
+      ],
+      "statisticsAvailabilityProbe": null,
+      "tableProfile": {
+        "basic": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"opensearch\""
+        },
+        "distribution": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"opensearch\""
+        },
+        "pattern": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"opensearch\""
+        },
+        "noColumns": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"opensearch\""
+        },
+        "noSegments": {
+          "reasonCode": "UNSUPPORTED_DIALECT",
+          "message": "no verified profile composition for provider type \"opensearch\""
         }
       }
     }

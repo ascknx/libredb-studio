@@ -32,10 +32,15 @@
  *   turned back into page one.
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseConnection, DatabaseType } from "@/lib/types";
-import type { DatabaseProvider, ProviderCapabilities } from "@/lib/db/types";
+import type {
+  DatabaseProvider,
+  ProviderCapabilities,
+  ProviderExecutionContext,
+  ReadOnlyStatementBudget,
+} from "@/lib/db/types";
 import { ElasticsearchProvider } from "@/lib/db/providers/sql/search";
 import { generateTableQuery } from "@/lib/query-generators";
 import { isSourcePartUnavailable } from "@/lib/db/object-kinds";
@@ -44,9 +49,11 @@ import {
   AuthenticationError,
   ConnectionError,
   DatabaseConfigError,
+  ExecutionProfileError,
   OffsetUnsupportedError,
   QueryCancelledError,
   QueryError,
+  RefusedBeforeSendError,
   TimeoutError,
 } from "@/lib/db/errors";
 
@@ -3775,5 +3782,403 @@ describe("endOpenQueryTransaction()", () => {
     expect(ABSENCES.filter((absence) => doc.includes(absence))).toEqual([
       "the engine has no transaction to leave open",
     ]);
+  });
+});
+
+/** The agent read-only profile's acquisition: read-only, and it sends statements. */
+const AGENT_PROFILE: ProviderExecutionContext = { readOnly: true, sendsStatements: true };
+
+const AGENT_BUDGET: ReadOnlyStatementBudget = { statementTimeoutMs: 5_000, maxResultRows: 100, maxResultBytes: 65_536 };
+
+// ============================================================================
+// The grammar's write refusals, replayed
+// ============================================================================
+
+/** One capture of tests/fixtures/elasticsearch/9.1.4/write-refusal/, written by tests/live/elasticsearch-write-refusals.ts. */
+interface WriteRefusalCapture {
+  readonly version: string;
+  readonly name: string;
+  readonly request: {
+    readonly method: string;
+    readonly path: string;
+    readonly query: Readonly<Record<string, string>>;
+    readonly body: { readonly query: string };
+    readonly auth: string;
+  };
+  readonly status: number;
+  readonly body: string;
+}
+
+const WRITE_REFUSAL_DIR = join(import.meta.dir, "../../fixtures/elasticsearch/9.1.4/write-refusal");
+
+const WRITE_REFUSALS: readonly WriteRefusalCapture[] = readdirSync(WRITE_REFUSAL_DIR)
+  .filter((file) => file.endsWith(".json"))
+  .sort()
+  .map((file) => JSON.parse(readFileSync(join(WRITE_REFUSAL_DIR, file), "utf8")) as WriteRefusalCapture);
+
+/**
+ * The SQL route's boundary, replayed: what 9.1.4 answered each write and DDL statement sent raw to `/_sql` on a node
+ * with security disabled (tests/live/elasticsearch-write-refusals.ts, 2026-10-29). The route carries free statement
+ * text, so the claim that it cannot write rests on these answers: each one is a grammar refusal, the cluster read back
+ * unchanged after each, and each reaches a caller as a statement refusal in the engine's own words, never as rows.
+ */
+describe("Elasticsearch 9.1.4's write refusals, replayed", () => {
+  const verbOf = (entry: WriteRefusalCapture): string => entry.request.body.query.split(" ")[0];
+
+  test("20 statements were captured raw on the SQL route, every one refused by the grammar with a 400", () => {
+    expect(WRITE_REFUSALS).toHaveLength(20);
+    for (const entry of WRITE_REFUSALS) {
+      expect(entry.version).toBe("9.1.4");
+      expect(entry.name.startsWith("write-refusal/")).toBe(true);
+      expect([entry.request.method, entry.request.path, entry.request.query, entry.request.auth]).toEqual([
+        "POST",
+        "/_sql",
+        { format: "json" },
+        "none",
+      ]);
+      expect(entry.status).toBe(400);
+      const error = (JSON.parse(entry.body) as { error: { type: string; reason: string } }).error;
+      expect(error.type).toBe("parsing_exception");
+      expect(error.reason).toMatch(/^line 1:\d+: (mismatched|extraneous) input /);
+    }
+  });
+
+  test("the captures cover INSERT, UPDATE, DELETE, CREATE, DROP and ALTER, and a write behind a read keyword", () => {
+    const verbs = new Set(WRITE_REFUSALS.map(verbOf));
+    for (const verb of ["INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TRUNCATE", "MERGE"]) {
+      expect(verbs).toContain(verb);
+    }
+    for (const reader of ["EXPLAIN", "DEBUG", "WITH", "SELECT"]) expect(verbs).toContain(reader);
+  });
+
+  test.each(WRITE_REFUSALS.map((entry) => [entry.name, entry] as const))(
+    "%s: the provider sends the captured request, and the engine's refusal reaches the caller as a QueryError",
+    async (_name, entry) => {
+      const provider = await connectProvider();
+      overrideSql(fail(entry.status, entry.body));
+      const error = await provider.query(entry.request.body.query).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(QueryError);
+      const reason = (JSON.parse(entry.body) as { error: { reason: string } }).error.reason;
+      expect((error as Error).message).toContain(reason);
+      const request = sqlRequests().at(-1);
+      expect(request?.body).toEqual({ ...entry.request.body, ...SQL_QUERY_OPTIONS });
+      await provider.disconnect();
+
+      // And an agent read the grammar answers this way is refused in the engine's own words, never as rows.
+      const agent = new ElasticsearchProvider(makeConnection(), {}, AGENT_PROFILE);
+      replyFor = defaultReply;
+      await agent.connect();
+      overrideSql(fail(entry.status, entry.body));
+      const refused = await agent
+        .queryReadOnly(entry.request.body.query, AGENT_BUDGET)
+        .catch((caught: unknown) => caught);
+      expect(refused).toBeInstanceOf(QueryError);
+      expect((refused as Error).message).toContain(reason);
+      expect(sqlRequests().at(-1)?.body).toMatchObject(entry.request.body);
+      await agent.disconnect();
+    },
+  );
+});
+
+// ============================================================================
+// The agent's catalog read, replayed
+// ============================================================================
+
+/** One capture of tests/fixtures/elasticsearch/9.1.4/catalog-read/, written by tests/live/elasticsearch-catalog-captures.ts. */
+interface CatalogReadCapture {
+  readonly version: string;
+  readonly name: string;
+  readonly request: { readonly body: { readonly query: string } };
+  readonly status: number;
+  readonly body: string;
+}
+
+const CATALOG_READ_DIR = join(import.meta.dir, "../../fixtures/elasticsearch/9.1.4/catalog-read");
+
+const CATALOG_READS: readonly CatalogReadCapture[] = readdirSync(CATALOG_READ_DIR)
+  .filter((file) => file.endsWith(".json"))
+  .sort()
+  .map((file) => JSON.parse(readFileSync(join(CATALOG_READ_DIR, file), "utf8")) as CatalogReadCapture);
+
+/**
+ * The agent's catalog read is a `SYS COLUMNS` command the agent composes (its Elasticsearch overlay), and the provider
+ * path has no statement fence of its own: the query-only endpoint takes the command as it takes a SELECT. Each capture
+ * is what 9.1.4 answered the composed statement (tests/live/elasticsearch-catalog-captures.ts, 2026-10-29), replayed
+ * through `queryReadOnly` under the agent profile.
+ */
+describe("Elasticsearch 9.1.4's catalog-read answers, replayed through queryReadOnly", () => {
+  test("four composed SYS COLUMNS statements were captured, each a 200", () => {
+    expect(CATALOG_READS).toHaveLength(4);
+    for (const entry of CATALOG_READS) {
+      expect(entry.version).toBe("9.1.4");
+      expect(entry.status).toBe(200);
+      expect(entry.request.body.query.startsWith("SYS COLUMNS")).toBe(true);
+    }
+  });
+
+  test.each(CATALOG_READS.map((entry) => [entry.name, entry] as const))(
+    "%s: the provider sends the composed command unchanged and answers the engine's rows",
+    async (_name, entry) => {
+      const agent = new ElasticsearchProvider(makeConnection(), {}, AGENT_PROFILE);
+      await agent.connect();
+      overrideSql(ok(entry.body));
+
+      const result = await agent.queryReadOnly(entry.request.body.query, AGENT_BUDGET);
+
+      const answer = JSON.parse(entry.body) as { columns: { name: string }[]; rows: unknown[][] };
+      expect(result.fields).toEqual(answer.columns.map((column) => column.name));
+      expect(result.rowCount).toBe(answer.rows.length);
+      expect(result.rows.map((row) => row.TABLE_NAME)).toEqual(answer.rows.map((row) => row[2]));
+      expect(sqlRequests().at(-1)?.body).toEqual({
+        query: entry.request.body.query,
+        fetch_size: AGENT_BUDGET.maxResultRows + 1,
+        ...SQL_QUERY_OPTIONS,
+      });
+      await agent.disconnect();
+    },
+  );
+});
+
+// ============================================================================
+// queryReadOnly: the agent read-only profile's statement path
+// ============================================================================
+
+describe("ElasticsearchProvider.queryReadOnly", () => {
+  async function agentProvider(execution: ProviderExecutionContext = AGENT_PROFILE): Promise<ElasticsearchProvider> {
+    const provider = new ElasticsearchProvider(makeConnection(), {}, execution);
+    await provider.connect();
+    return provider;
+  }
+
+  async function refusal(promise: Promise<unknown>): Promise<Error> {
+    const caught = await promise.catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(Error);
+    return caught as Error;
+  }
+
+  test("is declared on the class the factory constructs", () => {
+    expect(typeof ElasticsearchProvider.prototype.queryReadOnly).toBe("function");
+  });
+
+  test("returns the rows of an answer inside the budget, asking for one row past the row budget", async () => {
+    const provider = await agentProvider();
+
+    const result = await provider.queryReadOnly("SELECT id, customer FROM probe_orders", AGENT_BUDGET);
+
+    expect(result.rows).toEqual([
+      { id: 1, customer: "acme", total: 9.5, created: "2026-08-19T00:00:00.000Z", note: "hi" },
+    ]);
+    expect(result.rowCount).toBe(1);
+    expect(result.fields).toEqual(["id", "customer", "total", "created", "note"]);
+    expect(result.columnTypes?.customer).toBe("keyword");
+    expect(sqlRequests().at(-1)?.body).toEqual({
+      query: "SELECT id, customer FROM probe_orders",
+      fetch_size: AGENT_BUDGET.maxResultRows + 1,
+      ...SQL_QUERY_OPTIONS,
+    });
+    // The budget's deadline, and it is the client's: the engine has no request field this path sends for one.
+    expect(armedDeadlines.at(-1)).toBe(AGENT_BUDGET.statementTimeoutMs);
+  });
+
+  test("reads no result limit before a statement: its pages follow a cursor to the end, never cut", async () => {
+    const provider = await agentProvider();
+    const before = sent.length;
+
+    await provider.queryReadOnly("SELECT id, customer FROM probe_orders", AGENT_BUDGET);
+
+    expect(sent.slice(before).map((request) => request.path)).toEqual([SQL_PATH]);
+  });
+
+  test("refuses an answer past the row budget, after closing the cursor that answer left open", async () => {
+    const provider = await agentProvider();
+    overrideSql(ok(AGGREGATION_PAGE_ONE));
+
+    const error = await refusal(
+      provider.queryReadOnly("SELECT k, COUNT(*) FROM probe_buckets GROUP BY k", AGENT_BUDGET),
+    );
+
+    expect(error).toBeInstanceOf(QueryError);
+    expect(error.message).toBe(
+      `Read-only execution exceeded the row budget: 1000 rows > ${AGENT_BUDGET.maxResultRows} allowed`,
+    );
+    const close = sent.at(-1);
+    expect(close?.path).toBe("/_sql/close");
+    expect(close?.body).toEqual({ cursor: AGGREGATION_CURSOR });
+  });
+
+  test("refuses an answer past the byte budget", async () => {
+    const provider = await agentProvider();
+
+    const error = await refusal(
+      provider.queryReadOnly("SELECT id, customer, total, created, note FROM probe_orders", {
+        ...AGENT_BUDGET,
+        maxResultBytes: 10,
+      }),
+    );
+
+    expect(error).toBeInstanceOf(QueryError);
+    expect(error.message).toMatch(/^Read-only execution exceeded the byte budget: \d+ bytes > 10 allowed$/);
+  });
+
+  test("an engine refusal keeps the engine's words", async () => {
+    const provider = await agentProvider();
+    overrideSql(fail(400, MISSING_INDEX));
+
+    const error = await refusal(provider.queryReadOnly("SELECT * FROM nope_missing", AGENT_BUDGET));
+
+    expect(error).toBeInstanceOf(QueryError);
+    expect(error.message).toContain("Unknown index [nope_missing]");
+  });
+
+  test("a deadline that expires is the budget's, refused in the shared time-budget sentence", async () => {
+    const provider = await agentProvider();
+    abortReason = { use: true, reason: new DOMException("deadline", "TimeoutError") };
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", AGENT_BUDGET));
+
+    expect(error).toBeInstanceOf(QueryError);
+    expect(error.message).toBe(
+      `Read-only execution exceeded the time budget: no answer within ${AGENT_BUDGET.statementTimeoutMs}ms`,
+    );
+  });
+
+  test("a cancellation is not a deadline, and keeps the provider's own error", async () => {
+    const provider = await agentProvider();
+    abortReason = { use: true };
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", AGENT_BUDGET));
+
+    expect(error).toBeInstanceOf(QueryCancelledError);
+  });
+
+  test.each([
+    ["an editor handle", {}],
+    ["a read-only acquisition that sends no statement", { readOnly: true, sendsStatements: false }],
+  ] as const)("refuses on %s, with nothing sent", async (_name, execution) => {
+    const provider = await agentProvider(execution);
+    const before = sent.length;
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", AGENT_BUDGET));
+
+    // Nothing was sent, so the agent and MCP say so in Studio's voice rather than as the engine's refusal.
+    expect(error).toBeInstanceOf(RefusedBeforeSendError);
+    expect(error.message).toBe("Read-only execution requires a provider opened under the agent read-only profile");
+    expect(sent.length).toBe(before);
+  });
+
+  test("refuses a budget that is not a positive integer, with nothing sent", async () => {
+    const provider = await agentProvider();
+    const before = sent.length;
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", { ...AGENT_BUDGET, maxResultRows: 0 }));
+
+    expect(error.message).toContain("maxResultRows must be a positive integer");
+    expect(sent.length).toBe(before);
+  });
+
+  test("refuses the estimate-plan mode, with nothing sent: no plan is composed here", async () => {
+    const provider = await agentProvider();
+    const before = sent.length;
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", AGENT_BUDGET, "estimate-plan"));
+
+    expect(error).toBeInstanceOf(RefusedBeforeSendError);
+    expect(error.message).toBe("Elasticsearch composes no estimating plan for the agent");
+    expect(sent.length).toBe(before);
+  });
+
+  test("refuses before a connect", async () => {
+    const provider = new ElasticsearchProvider(makeConnection(), {}, AGENT_PROFILE);
+
+    const error = await refusal(provider.queryReadOnly("SELECT 1", AGENT_BUDGET));
+
+    expect(error.message).toContain("not connected");
+    expect(sent).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// The agent read-only profile's open: the measured release only
+// ============================================================================
+
+/**
+ * The boundary is the grammar of the SQL endpoint, and it was measured on 9.1.4 alone. So the open of a connection that
+ * sends agent statements reads the server's version (`GET /`, which a least-privilege user reads with the one cluster
+ * action `cluster:monitor/main`) and admits only Elasticsearch of the measured release line; any other version, an
+ * OpenSearch server behind an Elasticsearch connection, and a version it cannot read each refuse the profile.
+ */
+describe("ElasticsearchProvider agent profile open", () => {
+  function rootWith(version: Record<string, unknown>): Reply {
+    return ok(JSON.stringify({ name: "n", cluster_name: "c", version, tagline: "You Know, for Search" }));
+  }
+
+  async function openFailure(execution: ProviderExecutionContext = AGENT_PROFILE): Promise<unknown> {
+    const provider = new ElasticsearchProvider(makeConnection(), {}, execution);
+    return provider.connect().then(
+      () => provider,
+      (error: unknown) => error,
+    );
+  }
+
+  test("reads the version after the probe and admits the measured release line", async () => {
+    const opened = await openFailure();
+
+    expect(opened).toBeInstanceOf(ElasticsearchProvider);
+    expect(sent.map((request) => request.path)).toEqual([SQL_PATH, "/"]);
+  });
+
+  test("a patch release of the measured line is admitted", async () => {
+    overridePath("/", rootWith({ number: "9.1.10", build_flavor: "default" }));
+
+    expect(await openFailure()).toBeInstanceOf(ElasticsearchProvider);
+  });
+
+  test.each(["9.2.0", "8.19.4", "10.0.0", "9.10.1", ""])(
+    "refuses version %p: its refusals were never captured",
+    async (number) => {
+      overridePath("/", rootWith({ number, build_flavor: "default" }));
+
+      const error = await openFailure();
+
+      expect(error).toBeInstanceOf(ExecutionProfileError);
+      expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_UNSUPPORTED_TARGET");
+      expect((error as Error).message).toBe(
+        `The agent read-only profile is checked on Elasticsearch 9.1, and this server reports Elasticsearch ${number || "with no version"}: its write refusals have not been captured, so it is refused`,
+      );
+    },
+  );
+
+  test("refuses an OpenSearch server behind an Elasticsearch connection", async () => {
+    overridePath("/", rootWith({ number: "9.1.4", distribution: "opensearch" }));
+
+    const error = await openFailure();
+
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as Error).message).toBe(
+      "The agent read-only profile is checked on Elasticsearch 9.1, and this server reports opensearch 9.1.4: its write refusals have not been captured, so it is refused",
+    );
+  });
+
+  test("refuses when the version cannot be read, naming the one cluster action it needs", async () => {
+    overridePath("/", fail(403, NO_BODY));
+
+    const error = await openFailure();
+
+    expect(error).toBeInstanceOf(ExecutionProfileError);
+    expect((error as ExecutionProfileError).reasonCode).toBe("PROFILE_UNSUPPORTED_TARGET");
+    expect((error as Error).message).toStartWith(
+      "The agent read-only profile is checked on Elasticsearch 9.1, and this server's version could not be read, so it is refused (a user needs the cluster privilege cluster:monitor/main to read it): ",
+    );
+  });
+
+  test.each([
+    ["an editor handle", {}],
+    ["a read-only acquisition that sends no statement", { readOnly: true, sendsStatements: false }],
+  ] as const)("does not read the version on %s", async (_name, execution) => {
+    overridePath("/", rootWith({ number: "7.17.0" }));
+
+    expect(await openFailure(execution)).toBeInstanceOf(ElasticsearchProvider);
+    expect(sent.map((request) => request.path)).toEqual([SQL_PATH]);
   });
 });

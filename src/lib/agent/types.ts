@@ -655,7 +655,10 @@ export interface AgentUnlistedParentsNotNamed {
  *    kind that declares `countIsListing` and whose count was refused, so its listing was never
  *    sent (#1089 4.7). Its presence means none of the kind is among the objects, and that
  *    absence is no absence in the database; it is what lets plan mode ground an etcd user who
- *    is not root, where listing that kind would have lost the whole capture.
+ *    is not root, where listing that kind would have lost the whole capture. It is also every
+ *    kind's sentence where the provider declared through `inventoryNeedsConfiguration` that
+ *    nothing can be listed without configuration the connection lacks (U189), and the packing
+ *    then says nothing was listed rather than that the database reported none.
  */
 export interface AgentInventoryKind {
   readonly id: string;
@@ -852,6 +855,13 @@ export type AgentToolRefusal =
        * field existed carries none, and absent means unrecorded rather than `false`.
        */
       readonly answered?: boolean;
+      /**
+       * `false` when this server refused the statement before sending it (`RefusedBeforeSendError`: a provider's own
+       * fence, or the run's read allowance), so `message` is this server's sentence and the database never saw the
+       * statement. It is still a statement the run spent and a repair attempt, because the rewrite is the model's to
+       * author. Absent for a failure the database raised, and on every refusal recorded before this field existed.
+       */
+      readonly sent?: false;
     }
   | { readonly class: "reading-refused"; readonly reasonCode: AgentReadingDenyCode; readonly elapsedMs?: number }
   /**

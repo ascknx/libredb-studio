@@ -9,12 +9,19 @@ import { AgentComposedSqlError, MAX_CATALOG_SELECTOR_LENGTH } from "@/lib/agent/
 import { engineServerDialect } from "@/lib/agent/languages/engines/server";
 import { withoutExtensionOwnershipTest } from "@/lib/agent/languages/sql/engines/postgres";
 import { agentReadSqlInput, inspectAgentStatement } from "@/lib/db/operations/statement-guard";
-import { AGENT_STATEMENT_LANGUAGE } from "@/lib/agent/agent-manifest";
+import { druidAgentStatementRefusal } from "@/lib/db/providers/sql/druid/agent-boundary";
+import {
+  AGENT_REQUIREMENT_ENGINES,
+  AGENT_STATEMENT_LANGUAGE,
+  AGENT_WORKFLOW_VARIANTS,
+  workflowAvailability,
+} from "@/lib/agent/agent-manifest";
 import { SHIPPED_DATABASE_TYPES } from "@/lib/db/compatibility";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quoteLiteral } from "@/lib/sql/values";
+import type { AgentRunWorkflowType } from "@/lib/agent/types";
 
 /**
  * The SQL the SERVER composes (#329 T6, planning decision P1).
@@ -428,7 +435,7 @@ describe("composeCatalogRead — the relation and index inventories (#329 T8)", 
 
   test("an unserved dialect is refused for every kind, never composed on a guess", () => {
     for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
-      expect(() => composeCatalogRead("oracle", { kind }), kind).toThrow(AgentComposedSqlError);
+      expect(() => composeCatalogRead("spark", { kind }), kind).toThrow(AgentComposedSqlError);
     }
   });
 
@@ -528,7 +535,7 @@ describe("composeCatalogRead — the statistics inventory", () => {
   });
 
   test("an unserved dialect is refused with UNSUPPORTED_DIALECT rather than composed on a guess", () => {
-    for (const dialect of ["oracle", "mongodb", "redis"] as const) {
+    for (const dialect of ["spark", "mongodb", "redis"] as const) {
       try {
         composeCatalogRead(dialect, { kind: "statistics" });
         throw new Error(`expected a refusal for ${dialect}`);
@@ -563,7 +570,7 @@ describe("composeStatisticsAvailabilityProbe", () => {
 
   test("an unserved dialect is refused rather than answered with null", () => {
     try {
-      composeStatisticsAvailabilityProbe("oracle");
+      composeStatisticsAvailabilityProbe("spark");
       throw new Error("expected a refusal");
     } catch (error) {
       expect(error).toBeInstanceOf(AgentComposedSqlError);
@@ -682,14 +689,14 @@ describe("composeCatalogRead — a hostile selector becomes a literal, never sta
 
 describe("composeCatalogRead — dialects this milestone does not serve", () => {
   test("refuses rather than composing SQL it has not verified", () => {
-    for (const dialect of ["oracle", "mongodb", "redis"] as const) {
+    for (const dialect of ["spark", "mongodb", "redis"] as const) {
       expect(() => composeCatalogRead(dialect, {}), dialect).toThrow(AgentComposedSqlError);
     }
   });
 
   test("the refusal carries the UNSUPPORTED_DIALECT code", () => {
     try {
-      composeCatalogRead("oracle", {});
+      composeCatalogRead("spark", {});
       throw new Error("expected a refusal");
     } catch (error) {
       expect((error as AgentComposedSqlError).reasonCode).toBe("UNSUPPORTED_DIALECT");
@@ -1217,7 +1224,21 @@ describe("the composers are reachable, which is the defect that put this file he
    * is executed through its own tools and is not walked here.
    */
   test("every SQL execution engine composes every kind rather than refusing UNSUPPORTED_DIALECT", () => {
+    const composers = AGENT_REQUIREMENT_ENGINES["sql-composers"];
     for (const dialect of SHIPPED_DATABASE_TYPES.filter((type) => AGENT_STATEMENT_LANGUAGE[type] === "sql")) {
+      if (!composers.includes(dialect)) {
+        // An engine that declares no estimating plan is held out of every workflow that requires the composers, so no
+        // run there needs a plan that could only refuse; its declaration is what refuses here.
+        expect(() => composeEstimatingExplain(dialect, "SELECT 1"), dialect).toThrow(AgentComposedSqlError);
+        for (const [workflow, variant] of Object.entries(AGENT_WORKFLOW_VARIANTS.sql)) {
+          if (!variant.requires.includes("sql-composers")) continue;
+          expect(workflowAvailability("agent", workflow as AgentRunWorkflowType, dialect)).toMatchObject({
+            open: false,
+            cause: "requirement-unmet",
+          });
+        }
+        continue;
+      }
       for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
         expect(() => composeCatalogRead(dialect, { kind }), `${dialect}/${kind}`).not.toThrow(AgentComposedSqlError);
       }
@@ -1662,5 +1683,269 @@ describe("composeEstimatingExplain — the MySQL arm (#1612)", () => {
     const composed = composeEstimatingExplain("mysql", "SELECT id FROM app.orders");
     expect(composed.sql).toBe("EXPLAIN FORMAT=JSON SELECT id FROM app.orders");
     expect(composed.mode).toBe("execute");
+  });
+});
+
+/**
+ * Oracle's catalog read runs as the agent user, whose own schema, or a PUBLIC synonym, could hold an object named like
+ * a dictionary view; an unqualified name resolves to that first. So every view is named SYS.<view>, and each kind is
+ * pinned whole here, a selector's literals included.
+ */
+describe("composeCatalogRead — Oracle", () => {
+  const EXCLUDED = (column: string) =>
+    `${column} NOT IN (SELECT u.USERNAME FROM SYS.ALL_USERS u WHERE u.ORACLE_MAINTAINED = 'Y')`;
+
+  test("each kind is exactly the statement below, every dictionary view named SYS.<view>", () => {
+    const selector = { schema: "APP", table: "ORDERS" };
+    expect(composeCatalogRead("oracle", { ...selector, kind: "columns" })).toBe(
+      'SELECT c.OWNER AS "table_schema", c.TABLE_NAME AS "table_name", c.COLUMN_NAME AS "column_name", ' +
+        'c.DATA_TYPE AS "data_type", c.NULLABLE AS "is_nullable", c.COLUMN_ID AS "ordinal_position" ' +
+        `FROM SYS.ALL_TAB_COLUMNS c WHERE ${EXCLUDED("c.OWNER")} AND c.OWNER = 'APP' AND c.TABLE_NAME = 'ORDERS' ` +
+        "ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID",
+    );
+    expect(composeCatalogRead("oracle", { ...selector, kind: "relations" })).toBe(
+      'SELECT c.OWNER AS "table_schema", c.TABLE_NAME AS "table_name", cc.COLUMN_NAME AS "column_name", ' +
+        'r.OWNER AS "referenced_schema", r.TABLE_NAME AS "referenced_table", rc.COLUMN_NAME AS "referenced_column" ' +
+        "FROM SYS.ALL_CONSTRAINTS c " +
+        "JOIN SYS.ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME " +
+        "JOIN SYS.ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME " +
+        "JOIN SYS.ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME " +
+        "AND rc.POSITION = cc.POSITION " +
+        `WHERE c.CONSTRAINT_TYPE = 'R' AND ${EXCLUDED("c.OWNER")} AND c.OWNER = 'APP' AND c.TABLE_NAME = 'ORDERS' ` +
+        "ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION",
+    );
+    expect(composeCatalogRead("oracle", { ...selector, kind: "indexes" })).toBe(
+      'SELECT i.TABLE_OWNER AS "table_schema", i.TABLE_NAME AS "table_name", i.INDEX_NAME AS "index_name", ' +
+        "CASE WHEN i.UNIQUENESS = 'UNIQUE' THEN 'YES' ELSE 'NO' END AS \"is_unique\", " +
+        "CASE WHEN EXISTS (SELECT 1 FROM SYS.ALL_CONSTRAINTS k WHERE k.CONSTRAINT_TYPE = 'P' AND k.OWNER = i.TABLE_OWNER " +
+        "AND k.TABLE_NAME = i.TABLE_NAME AND k.INDEX_NAME = i.INDEX_NAME) THEN 'YES' ELSE 'NO' END AS \"is_primary\", " +
+        'ic.COLUMN_NAME AS "column_name" ' +
+        "FROM SYS.ALL_INDEXES i JOIN SYS.ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME " +
+        `WHERE ${EXCLUDED("i.TABLE_OWNER")} AND i.TABLE_OWNER = 'APP' AND i.TABLE_NAME = 'ORDERS' ` +
+        "ORDER BY i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_NAME, ic.COLUMN_POSITION",
+    );
+    expect(composeCatalogRead("oracle", { ...selector, kind: "statistics" })).toBe(
+      'SELECT t.OWNER AS "table_schema", t.TABLE_NAME AS "table_name", t.NUM_ROWS AS "estimated_rows" ' +
+        `FROM SYS.ALL_TABLES t WHERE ${EXCLUDED("t.OWNER")} AND t.OWNER = 'APP' AND t.TABLE_NAME = 'ORDERS' ` +
+        "ORDER BY t.OWNER, t.TABLE_NAME",
+    );
+  });
+
+  test("no kind names a dictionary view without SYS., and each passes the agent's input guard", () => {
+    for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
+      const sql = composeCatalogRead("oracle", { kind });
+      expect(guardAccepts(sql), kind).toBe(true);
+      expect(
+        [...sql.matchAll(/(?<![\w.$#])(?:ALL|USER|DBA)_[A-Z_$#]+/g)].map((m) => m[0]),
+        kind,
+      ).toEqual([]);
+      for (const [, source] of sql.matchAll(/\b(?:FROM|JOIN)\s+([A-Za-z_$#][\w$#.]*)/g)) {
+        expect(source.startsWith("SYS."), `${kind}: ${source}`).toBe(true);
+      }
+    }
+  });
+});
+
+/**
+ * Db2's catalog read runs as the agent user too, whose own schema or a public alias could hold an object named like a
+ * catalog view; an unqualified name resolves to that first. So every view is named SYSCAT.<view>, the schemas the system
+ * owns are left out by SYSCAT.SCHEMATA.OWNERTYPE rather than by their names, and each kind is pinned whole here, a
+ * selector's literals included.
+ */
+describe("composeCatalogRead — Db2", () => {
+  // A schema created implicitly is owned by SYSIBM, so the system's tables are told apart by their own owner.
+  const EXCLUDED = (schema: string, table: string) =>
+    `EXISTS (SELECT 1 FROM SYSCAT.TABLES o WHERE o.TABSCHEMA = ${schema} AND o.TABNAME = ${table} AND o.OWNERTYPE <> 'S')`;
+
+  test("each kind is exactly the statement below, every catalog view named SYSCAT.<view>", () => {
+    const selector = { schema: "APP", table: "ORDERS" };
+    expect(composeCatalogRead("db2", { ...selector, kind: "columns" })).toBe(
+      'SELECT RTRIM(c.TABSCHEMA) AS "table_schema", c.TABNAME AS "table_name", c.COLNAME AS "column_name", ' +
+        'RTRIM(c.TYPENAME) AS "data_type", c.NULLS AS "is_nullable", c.COLNO + 1 AS "ordinal_position" ' +
+        `FROM SYSCAT.COLUMNS c WHERE ${EXCLUDED("c.TABSCHEMA", "c.TABNAME")} AND c.TABSCHEMA = 'APP' AND c.TABNAME = 'ORDERS' ` +
+        "ORDER BY c.TABSCHEMA, c.TABNAME, c.COLNO",
+    );
+    expect(composeCatalogRead("db2", { ...selector, kind: "relations" })).toBe(
+      'SELECT RTRIM(r.TABSCHEMA) AS "table_schema", r.TABNAME AS "table_name", k.COLNAME AS "column_name", ' +
+        'RTRIM(r.REFTABSCHEMA) AS "referenced_schema", r.REFTABNAME AS "referenced_table", ' +
+        'p.COLNAME AS "referenced_column" ' +
+        "FROM SYSCAT.REFERENCES r " +
+        "JOIN SYSCAT.KEYCOLUSE k ON k.TABSCHEMA = r.TABSCHEMA AND k.TABNAME = r.TABNAME AND k.CONSTNAME = r.CONSTNAME " +
+        "JOIN SYSCAT.KEYCOLUSE p ON p.TABSCHEMA = r.REFTABSCHEMA AND p.TABNAME = r.REFTABNAME " +
+        "AND p.CONSTNAME = r.REFKEYNAME AND p.COLSEQ = k.COLSEQ " +
+        `WHERE ${EXCLUDED("r.TABSCHEMA", "r.TABNAME")} AND r.TABSCHEMA = 'APP' AND r.TABNAME = 'ORDERS' ` +
+        "ORDER BY r.TABSCHEMA, r.TABNAME, r.CONSTNAME, k.COLSEQ",
+    );
+    expect(composeCatalogRead("db2", { ...selector, kind: "indexes" })).toBe(
+      'SELECT RTRIM(i.TABSCHEMA) AS "table_schema", i.TABNAME AS "table_name", i.INDNAME AS "index_name", ' +
+        "CASE WHEN i.UNIQUERULE IN ('P', 'U') THEN 'YES' ELSE 'NO' END AS \"is_unique\", " +
+        "CASE WHEN i.UNIQUERULE = 'P' THEN 'YES' ELSE 'NO' END AS \"is_primary\", " +
+        'u.COLNAME AS "column_name" ' +
+        "FROM SYSCAT.INDEXES i JOIN SYSCAT.INDEXCOLUSE u ON u.INDSCHEMA = i.INDSCHEMA AND u.INDNAME = i.INDNAME " +
+        `WHERE ${EXCLUDED("i.TABSCHEMA", "i.TABNAME")} AND i.TABSCHEMA = 'APP' AND i.TABNAME = 'ORDERS' ` +
+        "ORDER BY i.TABSCHEMA, i.TABNAME, i.INDNAME, u.COLSEQ",
+    );
+    expect(composeCatalogRead("db2", { ...selector, kind: "statistics" })).toBe(
+      'SELECT RTRIM(t.TABSCHEMA) AS "table_schema", t.TABNAME AS "table_name", NULLIF(t.CARD, -1) AS "estimated_rows" ' +
+        "FROM SYSCAT.TABLES t WHERE t.TYPE IN ('T', 'S') AND t.OWNERTYPE <> 'S' AND t.TABSCHEMA = 'APP' " +
+        "AND t.TABNAME = 'ORDERS' ORDER BY t.TABSCHEMA, t.TABNAME",
+    );
+  });
+
+  test("no kind names a catalog view without SYSCAT., and each passes the agent's input guard", () => {
+    for (const kind of ["columns", "relations", "indexes", "statistics"] as const) {
+      const sql = composeCatalogRead("db2", { kind });
+      expect(guardAccepts(sql), kind).toBe(true);
+      for (const [, source] of sql.matchAll(/\b(?:FROM|JOIN)\s+([A-Za-z_$#][\w$#.]*)/g)) {
+        expect(source.startsWith("SYSCAT."), `${kind}: ${source}`).toBe(true);
+      }
+    }
+  });
+
+  test("it composes no estimating plan, since Db2's EXPLAIN writes into the explain tables", () => {
+    expect(() => composeEstimatingExplain("db2", "SELECT 1")).toThrow(AgentComposedSqlError);
+  });
+});
+
+/**
+ * Cassandra's catalog is `system_schema`, which every role may read and no user keyspace can shadow, since each table
+ * is named with its keyspace. CQL has no `NOT IN` to leave the system keyspaces out of a read of every keyspace, so the
+ * column read names one keyspace (measured on 5.0.9, `tests/fixtures/cassandra/5.0.9/agent-boundary/` capture 04), and
+ * the kinds CQL has nothing for are refused.
+ */
+describe("composeCatalogRead — Cassandra", () => {
+  test("the column kind is exactly the statement below, for a keyspace and for one of its tables", () => {
+    expect(composeCatalogRead("cassandra", { kind: "columns", schema: "probe" })).toBe(
+      "SELECT keyspace_name AS table_schema, table_name, column_name, type AS data_type, kind AS column_kind, " +
+        "position AS ordinal_position FROM system_schema.columns WHERE keyspace_name = 'probe'",
+    );
+    expect(composeCatalogRead("cassandra", { kind: "columns", schema: "probe", table: "customers" })).toBe(
+      "SELECT keyspace_name AS table_schema, table_name, column_name, type AS data_type, kind AS column_kind, " +
+        "position AS ordinal_position FROM system_schema.columns WHERE keyspace_name = 'probe' AND table_name = 'customers'",
+    );
+    expect(guardAccepts(composeCatalogRead("cassandra", { kind: "columns", schema: "probe" }))).toBe(true);
+  });
+
+  test("a name's single quote is doubled, the escape CQL reads inside a literal", () => {
+    expect(composeCatalogRead("cassandra", { kind: "columns", schema: "o'k" })).toContain("keyspace_name = 'o''k'");
+  });
+
+  test("a read of every keyspace is refused, naming the keyspace as what to give", () => {
+    expect(() => composeCatalogRead("cassandra", { kind: "columns" })).toThrow(
+      "Cassandra's catalog is read one keyspace at a time, so name the keyspace as the schema",
+    );
+    expect(() => composeCatalogRead("cassandra", { kind: "columns", table: "customers" })).toThrow(
+      AgentComposedSqlError,
+    );
+  });
+
+  test("the relation, index and statistics kinds are refused, each naming what CQL lacks", () => {
+    expect(() => composeCatalogRead("cassandra", { kind: "relations", schema: "probe" })).toThrow(
+      "Cassandra keeps no foreign key, so there is no such inventory to read",
+    );
+    expect(() => composeCatalogRead("cassandra", { kind: "indexes", schema: "probe" })).toThrow(
+      "Cassandra keeps no index a key read uses apart from the primary key, which the column inventory's column_kind names, so there is no such inventory to read",
+    );
+    expect(() => composeCatalogRead("cassandra", { kind: "statistics", schema: "probe" })).toThrow(
+      "Cassandra keeps no row count it can vouch for, so there is no such inventory to read",
+    );
+  });
+
+  test("it composes no estimating plan, since CQL has no EXPLAIN", () => {
+    expect(() => composeEstimatingExplain("cassandra", "SELECT 1")).toThrow(AgentComposedSqlError);
+  });
+});
+
+/**
+ * A Couchbase collection declares no columns, so the column read samples one collection's documents, named by its
+ * scope and its own name inside the connection's bucket (measured on 8.0.2 as a user holding only query_select,
+ * `tests/fixtures/couchbase/8.0.2/agent-boundary/` capture 07), and the kinds SQL++ has nothing for are refused.
+ */
+describe("composeCatalogRead — Couchbase", () => {
+  test("the column kind is exactly the statement below, for one collection of one scope", () => {
+    expect(composeCatalogRead("couchbase", { kind: "columns", schema: "_default", table: "_default" })).toBe(
+      "SELECT DISTINCT '_default' AS table_schema, '_default' AS table_name, p.name AS column_name, " +
+        "TYPE(p.val) AS data_type FROM (SELECT RAW d FROM `_default`.`_default` AS d LIMIT 100) AS doc " +
+        "UNNEST OBJECT_PAIRS(doc) AS p ORDER BY column_name, data_type",
+    );
+    expect(guardAccepts(composeCatalogRead("couchbase", { kind: "columns", schema: "s1", table: "c1" }))).toBe(true);
+  });
+
+  test("a name's quote and backtick are escaped as SQL++ reads them", () => {
+    const sql = composeCatalogRead("couchbase", { kind: "columns", schema: "o'k", table: "a`b" });
+    expect(sql).toContain("'o\\'k' AS table_schema");
+    expect(sql).toContain("FROM `o'k`.`a``b` AS d");
+  });
+
+  test("a read without a scope and a collection is refused, naming both as what to give", () => {
+    const refusal =
+      "Couchbase's collections declare no columns, so the fields are read from one collection's documents at a time: name its scope as the schema and the collection as the table";
+    expect(() => composeCatalogRead("couchbase", { kind: "columns" })).toThrow(refusal);
+    expect(() => composeCatalogRead("couchbase", { kind: "columns", schema: "_default" })).toThrow(refusal);
+    expect(() => composeCatalogRead("couchbase", { kind: "columns", table: "_default" })).toThrow(refusal);
+  });
+
+  test("the relation, index and statistics kinds are refused, each naming what SQL++ lacks", () => {
+    expect(() => composeCatalogRead("couchbase", { kind: "relations", schema: "_default" })).toThrow(
+      "Couchbase keeps no foreign key, so there is no such inventory to read",
+    );
+    expect(() => composeCatalogRead("couchbase", { kind: "indexes", schema: "_default" })).toThrow(
+      "Couchbase keeps no index list a user holding only query_select is shown, so there is no such inventory to read",
+    );
+    expect(() => composeCatalogRead("couchbase", { kind: "statistics", schema: "_default" })).toThrow(
+      "Couchbase keeps no row count it can vouch for, so there is no such inventory to read",
+    );
+  });
+
+  test("it composes no estimating plan, since the agent path sends only a SELECT", () => {
+    expect(() => composeEstimatingExplain("couchbase", "SELECT 1")).toThrow(AgentComposedSqlError);
+  });
+});
+
+/**
+ * Druid reads its catalog with a SELECT on INFORMATION_SCHEMA, which the server filters to the datasources the user may
+ * read (measured on 37.0.0 as a user holding READ on one datasource, `tests/fixtures/druid/37.0.0/agent-boundary/`
+ * capture 06), and every statement here is one the agent fence admits.
+ */
+describe("composeCatalogRead: Druid", () => {
+  const COLUMNS =
+    "SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name, COLUMN_NAME AS column_name, " +
+    "DATA_TYPE AS data_type, IS_NULLABLE AS is_nullable, ORDINAL_POSITION AS ordinal_position " +
+    "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA')";
+
+  test("the column kind is exactly the statement below, narrowed by schema and table", () => {
+    expect(composeCatalogRead("druid", { kind: "columns" })).toBe(
+      `${COLUMNS} ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`,
+    );
+    expect(composeCatalogRead("druid", { kind: "columns", schema: "druid", table: "libredb_o'brien" })).toBe(
+      `${COLUMNS} AND TABLE_SCHEMA = 'druid' AND TABLE_NAME = 'libredb_o''brien' ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION`,
+    );
+    expect(guardAccepts(composeCatalogRead("druid", { kind: "columns", table: "a" }))).toBe(true);
+    expect(druidAgentStatementRefusal(composeCatalogRead("druid", { kind: "columns", table: "a;b" }))).toBeNull();
+    // A backslash, which ends a plain Druid literal and which the fence's reader cannot place, never reaches it.
+    expect(() => composeCatalogRead("druid", { kind: "columns", table: "a\\" })).toThrow(AgentComposedSqlError);
+  });
+
+  test("the relation kind is the projection the other engines answer, with no rows, since Druid has no foreign key", () => {
+    const sql = composeCatalogRead("druid", { kind: "relations", schema: "druid" });
+    expect(sql).toBe(
+      "SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name, COLUMN_NAME AS column_name, " +
+        "'' AS referenced_schema, '' AS referenced_table, '' AS referenced_column " +
+        "FROM INFORMATION_SCHEMA.COLUMNS WHERE 1 = 0 AND TABLE_SCHEMA = 'druid'",
+    );
+    expect(druidAgentStatementRefusal(sql)).toBeNull();
+  });
+
+  test("the index and statistics kinds are refused, each naming why", () => {
+    expect(() => composeCatalogRead("druid", { kind: "indexes", schema: "druid" })).toThrow(
+      "Druid keeps no index object, since every dimension is indexed inside its segments, so there is no such inventory to read",
+    );
+    expect(() => composeCatalogRead("druid", { kind: "statistics", schema: "druid" })).toThrow(
+      "Druid keeps no row count in its catalog, only in the segment list, which is not read here, so there is no such inventory to read",
+    );
+  });
+
+  test("it composes no estimating plan, since the agent path sends only a SELECT", () => {
+    expect(() => composeEstimatingExplain("druid", "SELECT 1")).toThrow(AgentComposedSqlError);
   });
 });

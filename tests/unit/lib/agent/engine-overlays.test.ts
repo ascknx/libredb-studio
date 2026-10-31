@@ -5,22 +5,77 @@ import { languageClientPack } from "@/lib/agent/languages/client";
 import { engineClientPack, enginesSupporting } from "@/lib/agent/languages/engines/client";
 import { agentEnginePack } from "@/lib/agent/languages/engines/index";
 import { engineServerDialect, engineServerOverlay } from "@/lib/agent/languages/engines/server";
+import * as INFLUXQL_CLIENT_OVERLAYS from "@/lib/agent/languages/influxql/engines/client";
+import * as INFLUXDB from "@/lib/agent/languages/influxql/engines/influxdb";
+import { INFLUXQL_PACK } from "@/lib/agent/languages/influxql/index";
+import * as WEAVIATEAPI_CLIENT_OVERLAYS from "@/lib/agent/languages/weaviateapi/engines/client";
+import * as WEAVIATE from "@/lib/agent/languages/weaviateapi/engines/weaviate";
+import { WEAVIATEAPI_PACK } from "@/lib/agent/languages/weaviateapi/index";
+import * as QDRANTAPI_CLIENT_OVERLAYS from "@/lib/agent/languages/qdrantapi/engines/client";
+import * as QDRANT from "@/lib/agent/languages/qdrantapi/engines/qdrant";
+import { QDRANTAPI_PACK } from "@/lib/agent/languages/qdrantapi/index";
+import * as CYPHER_CLIENT_OVERLAYS from "@/lib/agent/languages/cypher/engines/client";
+import * as NEO4J from "@/lib/agent/languages/cypher/engines/neo4j";
+import { CYPHER_PACK } from "@/lib/agent/languages/cypher/index";
+import * as MILVUSRPC_CLIENT_OVERLAYS from "@/lib/agent/languages/milvusrpc/engines/client";
+import * as MILVUS from "@/lib/agent/languages/milvusrpc/engines/milvus";
+import { MILVUSRPC_PACK } from "@/lib/agent/languages/milvusrpc/index";
+import * as REDISCLI_CLIENT_OVERLAYS from "@/lib/agent/languages/rediscli/engines/client";
+import * as REDIS from "@/lib/agent/languages/rediscli/engines/redis";
+import { REDISCLI_PACK } from "@/lib/agent/languages/rediscli/index";
+import * as ETCDCTL_CLIENT_OVERLAYS from "@/lib/agent/languages/etcdctl/engines/client";
+import * as ETCD from "@/lib/agent/languages/etcdctl/engines/etcd";
+import { ETCDCTL_PACK } from "@/lib/agent/languages/etcdctl/index";
+import * as OXIACLI_CLIENT_OVERLAYS from "@/lib/agent/languages/oxiacli/engines/client";
+import * as OXIA from "@/lib/agent/languages/oxiacli/engines/oxia";
+import { OXIACLI_PACK } from "@/lib/agent/languages/oxiacli/index";
+import * as RABBITREAD_CLIENT_OVERLAYS from "@/lib/agent/languages/rabbitread/engines/client";
+import * as RABBITMQ from "@/lib/agent/languages/rabbitread/engines/rabbitmq";
+import { RABBITREAD_PACK } from "@/lib/agent/languages/rabbitread/index";
+import * as KAFKAREAD_CLIENT_OVERLAYS from "@/lib/agent/languages/kafkaread/engines/client";
+import * as KAFKA from "@/lib/agent/languages/kafkaread/engines/kafka";
+import { KAFKAREAD_PACK } from "@/lib/agent/languages/kafkaread/index";
+import * as S3API_CLIENT_OVERLAYS from "@/lib/agent/languages/s3api/engines/client";
+import * as S3 from "@/lib/agent/languages/s3api/engines/s3";
+import { S3API_PACK } from "@/lib/agent/languages/s3api/index";
+import * as FSQUERY_CLIENT_OVERLAYS from "@/lib/agent/languages/fsquery/engines/client";
+import * as FIRESTORE from "@/lib/agent/languages/fsquery/engines/firestore";
+import { FSQUERY_PACK } from "@/lib/agent/languages/fsquery/index";
+import * as SNMPGET_CLIENT_OVERLAYS from "@/lib/agent/languages/snmpget/engines/client";
+import * as SNMP from "@/lib/agent/languages/snmpget/engines/snmp";
+import { SNMPGET_PACK } from "@/lib/agent/languages/snmpget/index";
+import * as NETCONFRPC_CLIENT_OVERLAYS from "@/lib/agent/languages/netconfrpc/engines/client";
+import * as NETCONF from "@/lib/agent/languages/netconfrpc/engines/netconf";
+import { NETCONFRPC_PACK } from "@/lib/agent/languages/netconfrpc/index";
+import * as MODBUSREAD_CLIENT_OVERLAYS from "@/lib/agent/languages/modbusread/engines/client";
+import * as MODBUS from "@/lib/agent/languages/modbusread/engines/modbus";
+import { MODBUSREAD_PACK } from "@/lib/agent/languages/modbusread/index";
 import * as KUBECTL_CLIENT_OVERLAYS from "@/lib/agent/languages/kubectl/engines/client";
 import * as KUBERNETES from "@/lib/agent/languages/kubectl/engines/kubernetes";
+import * as LIBREDBKV_CLIENT_OVERLAYS from "@/lib/agent/languages/libredbkv/engines/client";
+import * as LIBREDB from "@/lib/agent/languages/libredbkv/engines/libredb";
 import { KUBECTL_PACK } from "@/lib/agent/languages/kubectl/index";
+import { LIBREDBKV_PACK } from "@/lib/agent/languages/libredbkv/index";
 import * as MONGO_CLIENT_OVERLAYS from "@/lib/agent/languages/mongo/engines/client";
 import * as MONGODB from "@/lib/agent/languages/mongo/engines/mongodb";
 import { MONGO_PACK } from "@/lib/agent/languages/mongo/index";
 import { defineOverlay, dialectOnly, ENGINE_OVERRIDABLE_SERVER_MEMBERS } from "@/lib/agent/languages/overlay";
 import type { AgentEngineClientDialect, AgentEngineServerDialect } from "@/lib/agent/languages/pack";
 import { languageServerPack } from "@/lib/agent/languages/server";
+import * as CASSANDRA from "@/lib/agent/languages/sql/engines/cassandra";
 import * as CLICKHOUSE from "@/lib/agent/languages/sql/engines/clickhouse";
+import * as COUCHBASE from "@/lib/agent/languages/sql/engines/couchbase";
+import * as DRUID from "@/lib/agent/languages/sql/engines/druid";
+import * as ELASTICSEARCH from "@/lib/agent/languages/sql/engines/elasticsearch";
 import * as INFLUXDB3 from "@/lib/agent/languages/sql/engines/influxdb3";
 import * as LIBSQL from "@/lib/agent/languages/sql/engines/libsql";
 import * as SQL_CLIENT_OVERLAYS from "@/lib/agent/languages/sql/engines/client";
 import * as DUCKDB from "@/lib/agent/languages/sql/engines/duckdb";
 import * as MSSQL from "@/lib/agent/languages/sql/engines/mssql";
 import * as MYSQL from "@/lib/agent/languages/sql/engines/mysql";
+import * as DB2 from "@/lib/agent/languages/sql/engines/db2";
+import * as OPENSEARCH from "@/lib/agent/languages/sql/engines/opensearch";
+import * as ORACLE from "@/lib/agent/languages/sql/engines/oracle";
 import * as POSTGRES from "@/lib/agent/languages/sql/engines/postgres";
 import * as SQLITE from "@/lib/agent/languages/sql/engines/sqlite";
 import { SQL_PACK } from "@/lib/agent/languages/sql/index";
@@ -64,11 +119,50 @@ const ENGINE_MODULES: Readonly<Record<string, Readonly<Record<string, unknown>>>
   "sql/engines/clickhouse": CLICKHOUSE,
   "sql/engines/libsql": LIBSQL,
   "sql/engines/influxdb3": INFLUXDB3,
+  "sql/engines/elasticsearch": ELASTICSEARCH,
+  "sql/engines/opensearch": OPENSEARCH,
+  "sql/engines/oracle": ORACLE,
+  "sql/engines/db2": DB2,
+  "sql/engines/cassandra": CASSANDRA,
+  "sql/engines/couchbase": COUCHBASE,
+  "sql/engines/druid": DRUID,
   "sql/engines/client": SQL_CLIENT_OVERLAYS,
   "mongo/engines/mongodb": MONGODB,
   "mongo/engines/client": MONGO_CLIENT_OVERLAYS,
   "kubectl/engines/kubernetes": KUBERNETES,
   "kubectl/engines/client": KUBECTL_CLIENT_OVERLAYS,
+  "libredbkv/engines/libredb": LIBREDB,
+  "libredbkv/engines/client": LIBREDBKV_CLIENT_OVERLAYS,
+  "influxql/engines/influxdb": INFLUXDB,
+  "influxql/engines/client": INFLUXQL_CLIENT_OVERLAYS,
+  "weaviateapi/engines/weaviate": WEAVIATE,
+  "weaviateapi/engines/client": WEAVIATEAPI_CLIENT_OVERLAYS,
+  "qdrantapi/engines/qdrant": QDRANT,
+  "qdrantapi/engines/client": QDRANTAPI_CLIENT_OVERLAYS,
+  "cypher/engines/neo4j": NEO4J,
+  "cypher/engines/client": CYPHER_CLIENT_OVERLAYS,
+  "milvusrpc/engines/milvus": MILVUS,
+  "milvusrpc/engines/client": MILVUSRPC_CLIENT_OVERLAYS,
+  "rediscli/engines/redis": REDIS,
+  "rediscli/engines/client": REDISCLI_CLIENT_OVERLAYS,
+  "etcdctl/engines/etcd": ETCD,
+  "etcdctl/engines/client": ETCDCTL_CLIENT_OVERLAYS,
+  "oxiacli/engines/oxia": OXIA,
+  "oxiacli/engines/client": OXIACLI_CLIENT_OVERLAYS,
+  "rabbitread/engines/rabbitmq": RABBITMQ,
+  "rabbitread/engines/client": RABBITREAD_CLIENT_OVERLAYS,
+  "kafkaread/engines/kafka": KAFKA,
+  "kafkaread/engines/client": KAFKAREAD_CLIENT_OVERLAYS,
+  "s3api/engines/s3": S3,
+  "s3api/engines/client": S3API_CLIENT_OVERLAYS,
+  "fsquery/engines/firestore": FIRESTORE,
+  "fsquery/engines/client": FSQUERY_CLIENT_OVERLAYS,
+  "snmpget/engines/snmp": SNMP,
+  "snmpget/engines/client": SNMPGET_CLIENT_OVERLAYS,
+  "netconfrpc/engines/netconf": NETCONF,
+  "netconfrpc/engines/client": NETCONFRPC_CLIENT_OVERLAYS,
+  "modbusread/engines/modbus": MODBUS,
+  "modbusread/engines/client": MODBUSREAD_CLIENT_OVERLAYS,
 };
 
 /** Every overlay an engine module exports, named `<module>#<export>`. */
@@ -90,11 +184,34 @@ describe("the engine registry", () => {
       "sqlite",
       "libsql",
       "duckdb",
+      "oracle",
+      "db2",
       "mssql",
       "clickhouse",
+      "druid",
+      "cassandra",
+      "elasticsearch",
+      "opensearch",
       "mongodb",
+      "couchbase",
+      "redis",
+      "kafka",
+      "etcd",
+      "neo4j",
+      "milvus",
+      "qdrant",
+      "weaviate",
+      "influxdb",
       "influxdb3",
+      "oxia",
+      "s3",
       "kubernetes",
+      "firestore",
+      "rabbitmq",
+      "modbus",
+      "netconf",
+      "snmp",
+      "libredb",
     ]);
     expect(SQL_ENGINES).toEqual([
       "postgres",
@@ -102,8 +219,15 @@ describe("the engine registry", () => {
       "sqlite",
       "libsql",
       "duckdb",
+      "oracle",
+      "db2",
       "mssql",
       "clickhouse",
+      "druid",
+      "cassandra",
+      "elasticsearch",
+      "opensearch",
+      "couchbase",
       "influxdb3",
     ]);
   });
@@ -130,12 +254,12 @@ describe("the engine registry", () => {
   test("a name that is no engine has no pack, inherited names included", () => {
     expect(() => engineClientPack("toString" as DatabaseType)).toThrow(new Error("no engine pack for toString"));
     expect(() => agentEnginePack("toString" as DatabaseType)).toThrow(new Error("no engine pack for toString"));
-    expect(() => agentEnginePack("oracle")).toThrow(new Error("no engine pack for oracle"));
+    expect(() => agentEnginePack("spark")).toThrow(new Error("no engine pack for spark"));
   });
 
   test("every engine module's server overlay holds a dialect and overridable members, its client one a dialect alone (ruling 2)", () => {
     const exported = exportedOverlays();
-    expect(exported).toHaveLength(20);
+    expect(exported).toHaveLength(66);
     // The one other export is the PostgreSQL retry's rewrite, which its tests call directly.
     expect(
       Object.entries(ENGINE_MODULES)
@@ -149,13 +273,45 @@ describe("the engine registry", () => {
     }
   });
 
-  test("no shipped overlay overrides a Shared member (provisional: the first engine that does deletes this test)", () => {
-    for (const [, overlay] of exportedOverlays()) {
-      expect(Object.keys(overlay).filter((key) => key !== "dialect")).toEqual([]);
+  const GROUNDING_OVERLAYS = [
+    "sql/engines/cassandra#CASSANDRA_SERVER_OVERLAY",
+    "sql/engines/couchbase#COUCHBASE_SERVER_OVERLAY",
+  ];
+
+  test("Cassandra's and Couchbase's overlays alone override a Shared member, their grounding, which keeps the SQL grounding and adds the dialect's rules", () => {
+    for (const [name, overlay] of exportedOverlays()) {
+      const shared = Object.keys(overlay).filter((key) => key !== "dialect");
+      expect(shared).toEqual(GROUNDING_OVERLAYS.includes(name) ? ["grounding"] : []);
     }
     for (const type of ENGINES) {
-      expect(Object.keys(engineServerOverlay(type)).filter((key) => key !== "dialect")).toEqual([]);
+      const shared = Object.keys(engineServerOverlay(type)).filter((key) => key !== "dialect");
+      expect(shared).toEqual(type === "cassandra" || type === "couchbase" ? ["grounding"] : []);
     }
+    const base = languageServerPack("sql").grounding;
+    const grounding = agentEnginePack("cassandra").server.grounding;
+    expect(grounding).toEqual({
+      ...base,
+      relations: false,
+      planningRules: [
+        "CQL reads one table per statement: there is no JOIN, no subquery, no UNION and no OFFSET, and GROUP BY and ORDER BY take only primary key columns in key order.",
+        "Restrict the partition key with = or IN, then clustering columns in key order; a predicate on any other column needs ALLOW FILTERING, which scans the table, and ALLOW FILTERING goes last, after LIMIT.",
+        "Name each table with its keyspace, as keyspace.table.",
+      ],
+    });
+    expect(Object.isFrozen(grounding)).toBe(true);
+    const couchbase = agentEnginePack("couchbase").server.grounding;
+    expect(couchbase).toEqual({
+      ...base,
+      relations: false,
+      planningRules: [
+        "Name a collection as scope.collection with each part in backticks (`_default`.`_default` for the bucket's default collection): the query context is the connection's bucket, and a bare name reads as a collection of the _default scope.",
+        "Documents are JSON: reach a nested field with a dot (d.address.city) and an array element with brackets, and alias the collection (FROM `s`.`c` AS d) so META(d).id names the document key.",
+      ],
+    });
+    expect(Object.isFrozen(couchbase)).toBe(true);
+    // A plan run drafts any statement, a write included, for the owner to run in the editor: the agent path's
+    // one-SELECT fence is the provider's to enforce and never a planning rule.
+    expect(couchbase.planningRules?.some((rule) => /\bSELECT\b/.test(rule))).toBe(false);
   });
 });
 
@@ -165,15 +321,34 @@ describe("the engine packs", () => {
     expect(agentEnginePack("kubernetes")).toBe(KUBECTL_PACK);
     expect(agentEnginePack("mongodb")).toEqual(MONGO_PACK);
     expect(agentEnginePack("kubernetes")).toEqual(KUBECTL_PACK);
+    expect(agentEnginePack("libredb")).toBe(LIBREDBKV_PACK);
+    expect(agentEnginePack("influxdb")).toBe(INFLUXQL_PACK);
+    expect(agentEnginePack("weaviate")).toBe(WEAVIATEAPI_PACK);
+    expect(agentEnginePack("qdrant")).toBe(QDRANTAPI_PACK);
+    expect(agentEnginePack("neo4j")).toBe(CYPHER_PACK);
+    expect(agentEnginePack("milvus")).toBe(MILVUSRPC_PACK);
+    expect(agentEnginePack("redis")).toBe(REDISCLI_PACK);
+    expect(agentEnginePack("etcd")).toBe(ETCDCTL_PACK);
+    expect(agentEnginePack("oxia")).toBe(OXIACLI_PACK);
+    expect(agentEnginePack("rabbitmq")).toBe(RABBITREAD_PACK);
+    expect(agentEnginePack("kafka")).toBe(KAFKAREAD_PACK);
+    expect(agentEnginePack("s3")).toBe(S3API_PACK);
+    expect(agentEnginePack("firestore")).toBe(FSQUERY_PACK);
+    expect(agentEnginePack("snmp")).toBe(SNMPGET_PACK);
+    expect(agentEnginePack("netconf")).toBe(NETCONFRPC_PACK);
+    expect(agentEnginePack("modbus")).toBe(MODBUSREAD_PACK);
   });
 
   test.each(SQL_ENGINES)("%s is the SQL pack member for member, with its own dialect on the server facet", (type) => {
     const pack = agentEnginePack(type);
     const server = languageServerPack("sql");
+    const overridden = Object.keys(engineServerOverlay(type)).filter((key) => key !== "dialect");
     expect(pack.id).toBe("sql");
     expect(pack.execution).toBe(SQL_PACK.execution);
     expect(Object.keys(without(pack.server, "dialect"))).toEqual(Object.keys(server));
     for (const [member, value] of Object.entries(without(pack.server, "dialect"))) {
+      // A member the engine's overlay overrides is its own, held by the test above; every other is the family's.
+      if (overridden.includes(member)) continue;
       expect(value).toBe((server as unknown as Record<string, unknown>)[member]);
     }
     const client = languageClientPack(AGENT_STATEMENT_LANGUAGE[type] as "sql");
@@ -202,7 +377,28 @@ describe("engineServerDialect", () => {
   });
 
   test("a type with no overlay holds an empty one, so its server facet is its family's own", () => {
-    for (const type of ["oracle", "toString", "mongodb", "kubernetes"] as DatabaseType[]) {
+    for (const type of [
+      "spark",
+      "toString",
+      "mongodb",
+      "kubernetes",
+      "libredb",
+      "influxdb",
+      "weaviate",
+      "qdrant",
+      "neo4j",
+      "milvus",
+      "redis",
+      "etcd",
+      "oxia",
+      "rabbitmq",
+      "kafka",
+      "s3",
+      "firestore",
+      "snmp",
+      "netconf",
+      "modbus",
+    ] as DatabaseType[]) {
       expect(Object.keys(engineServerOverlay(type))).toEqual([]);
     }
     expect(engineServerOverlay("postgres").dialect).toBe(engineServerDialect("postgres"));
@@ -224,7 +420,7 @@ describe("engineServerDialect", () => {
     }
   });
 
-  test("planEstimate is supplied on every SQL engine: a prefix on seven, SQL Server's session mode", () => {
+  test("planEstimate is supplied on every SQL engine but the two search engines, Oracle and Db2: a prefix on seven, SQL Server's session mode", () => {
     expect(Object.fromEntries(SQL_ENGINES.map((type) => [type, engineServerDialect(type).planEstimate]))).toEqual({
       postgres: { kind: "prefix", prefix: "EXPLAIN (FORMAT JSON)" },
       mysql: { kind: "prefix", prefix: "EXPLAIN FORMAT=JSON" },
@@ -232,10 +428,27 @@ describe("engineServerDialect", () => {
       duckdb: { kind: "prefix", prefix: "EXPLAIN (FORMAT JSON)" },
       mssql: { kind: "session-mode", mode: "estimate-plan" },
       clickhouse: { kind: "prefix", prefix: "EXPLAIN json = 1, indexes = 1" },
+      // Its EXPLAIN answers the engine's own plan text, which no explain strategy reads.
+      elasticsearch: "unsupported",
+      // It answers no EXPLAIN the provider reads.
+      opensearch: "unsupported",
+      // Its EXPLAIN PLAN writes into PLAN_TABLE, which the read-only user is refused.
+      oracle: "unsupported",
+      // Its EXPLAIN writes into the explain tables, which the agent user may not write.
+      db2: "unsupported",
+      // CQL has no EXPLAIN.
+      cassandra: "unsupported",
+      // The agent path sends only a SELECT, never an EXPLAIN.
+      couchbase: "unsupported",
+      // The agent path sends only a SELECT, never an EXPLAIN PLAN FOR.
+      druid: "unsupported",
       libsql: { kind: "prefix", prefix: "EXPLAIN QUERY PLAN" },
       influxdb3: { kind: "prefix", prefix: "EXPLAIN" },
     });
-    for (const type of SQL_ENGINES) expect(Object.isFrozen(engineServerDialect(type).planEstimate)).toBe(true);
+    for (const type of SQL_ENGINES) {
+      const planEstimate = engineServerDialect(type).planEstimate;
+      if (planEstimate !== "unsupported") expect(Object.isFrozen(planEstimate)).toBe(true);
+    }
   });
 
   test("catalogRead is supplied on every SQL engine, with SQLite's and libSQL's relation read their object read", () => {
@@ -252,19 +465,31 @@ describe("engineServerDialect", () => {
     }
     expect(composers("sqlite").relations).toBe(composers("sqlite").columns);
     expect(composers("libsql").relations).toBe(composers("libsql").columns);
-    for (const type of ["postgres", "duckdb", "mssql", "mysql", "clickhouse", "influxdb3"] as const) {
+    for (const type of [
+      "postgres",
+      "duckdb",
+      "mssql",
+      "mysql",
+      "clickhouse",
+      "influxdb3",
+      "elasticsearch",
+      "opensearch",
+      "db2",
+    ] as const) {
       expect(composers(type).relations).not.toBe(composers(type).columns);
     }
   });
 
-  test("only SQLite and libSQL fold the declared schema, and only PostgreSQL retries a failed catalog read", () => {
-    const supplied = (member: "declaredSchema" | "retry") =>
+  test("only SQLite and libSQL fold the declared schema, only PostgreSQL retries a failed catalog read, and only the two search engines map their catalog rows and read their catalog with a command", () => {
+    const supplied = (member: "declaredSchema" | "retry" | "mapRows" | "commandShaped") =>
       SQL_ENGINES.filter((type) => {
         const catalogRead = engineServerDialect(type).catalogRead;
         return catalogRead !== "unsupported" && catalogRead[member] !== undefined;
       });
     expect(supplied("declaredSchema")).toEqual(["sqlite", "libsql"]);
     expect(supplied("retry")).toEqual(["postgres"]);
+    expect(supplied("mapRows")).toEqual(["elasticsearch", "opensearch"]);
+    expect(supplied("commandShaped")).toEqual(["elasticsearch", "opensearch"]);
     const sqlite = engineServerDialect("sqlite").catalogRead;
     const postgres = engineServerDialect("postgres").catalogRead;
     if (sqlite === "unsupported" || postgres === "unsupported") throw new Error("catalog read missing");
@@ -285,6 +510,8 @@ describe("engineServerDialect", () => {
     expect(engineServerDialect("mysql").statistics).toBe("unsupported");
     expect(engineServerDialect("clickhouse").statistics).toBe("unsupported");
     expect(engineServerDialect("influxdb3").statistics).toBe("unsupported");
+    expect(engineServerDialect("elasticsearch").statistics).toBe("unsupported");
+    expect(engineServerDialect("opensearch").statistics).toBe("unsupported");
     const reading = (type: DatabaseType) => {
       const statistics = engineServerDialect(type).statistics;
       if (statistics === "unsupported") throw new Error(`${type} has no statistics`);
@@ -314,7 +541,17 @@ describe("engineServerDialect", () => {
   test("catalogCapture is supplied on PostgreSQL and SQLite, each with its own kinds, builder and kind words", () => {
     const supplied = SQL_ENGINES.filter((type) => engineServerDialect(type).catalogCapture !== "unsupported");
     expect(supplied).toEqual(["postgres", "sqlite"]);
-    for (const type of ["duckdb", "mssql", "mysql", "clickhouse", "libsql", "influxdb3"] as const) {
+    for (const type of [
+      "duckdb",
+      "mssql",
+      "mysql",
+      "clickhouse",
+      "libsql",
+      "influxdb3",
+      "elasticsearch",
+      "opensearch",
+      "db2",
+    ] as const) {
       expect(engineServerDialect(type).catalogCapture).toBe("unsupported");
     }
     const capture = (type: DatabaseType) => {
@@ -366,11 +603,39 @@ describe("the client dialect", () => {
       duckdb: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
       mssql: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
       clickhouse: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
+      elasticsearch: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      opensearch: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      oracle: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      db2: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      cassandra: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      couchbase: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
+      druid: { catalogRead: "supported", planEstimate: "unsupported", catalogCapture: "unsupported" },
       libsql: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
       influxdb3: { catalogRead: "supported", planEstimate: "supported", catalogCapture: "unsupported" },
     });
     for (const type of SQL_ENGINES) expect(Object.isFrozen(clientDialect(type))).toBe(true);
-    for (const type of ["mongodb", "kubernetes"] as const) expect(engineClientPack(type).dialect).toBeUndefined();
+    for (const type of [
+      "mongodb",
+      "kubernetes",
+      "libredb",
+      "influxdb",
+      "weaviate",
+      "qdrant",
+      "neo4j",
+      "milvus",
+      "redis",
+      "etcd",
+      "oxia",
+      "rabbitmq",
+      "kafka",
+      "s3",
+      "firestore",
+      "snmp",
+      "netconf",
+      "modbus",
+    ] as const) {
+      expect(engineClientPack(type).dialect).toBeUndefined();
+    }
   });
 
   test.each(ENGINES)("%s holds each client member exactly when its server dialect supplies it", (type) => {

@@ -231,14 +231,16 @@ describe("the panel's documentation describes the rail in the words it renders",
   });
 
   test("the guide's strip table has one row for each reading the posture renders, and no other", () => {
-    // Every reading the strip can show, from the module that writes it: plan mode, agent mode with no connection
-    // resolved, agent mode on every engine with the hand-over consented and not, and agent mode on every engine after
-    // a run on the connection was refused for the connection itself. The engine is labelled the way the guide names
-    // one, so the arm that names it renders the guide's own placeholder.
+    // Every reading the strip can show, from the module that writes it: plan mode with no connection resolved and on
+    // every engine (a language pack may declare its own plan posture), agent mode with no connection resolved, agent
+    // mode on every engine with the hand-over consented and not, and agent mode on every engine after a run on the
+    // connection was refused for the connection itself. The engine is labelled the way the guide names one, so the arm
+    // that names it renders the guide's own placeholder.
     const label = "`<engine>`";
     const engines = Object.keys(AGENT_STATEMENT_LANGUAGE) as DatabaseType[];
     const postures = [
       agentPosture({ mode: "planning", engine: null, engineLabel: label, handover: false }),
+      ...engines.map((engine) => agentPosture({ mode: "planning", engine, engineLabel: label, handover: false })),
       agentPosture({ mode: "agent", engine: null, engineLabel: label, handover: false }),
       ...engines.flatMap((engine) =>
         [false, true].map((handover) => agentPosture({ mode: "agent", engine, engineLabel: label, handover })),
@@ -476,6 +478,29 @@ const READ_ONLY_PROVIDER_FILES: Readonly<Record<string, string>> = {
   clickhouse: "src/lib/db/providers/sql/clickhouse/index.ts",
   libsql: "src/lib/db/providers/sql/libsql/index.ts",
   influxdb3: "src/lib/db/providers/timeseries/influxdb/sql-provider.ts",
+  elasticsearch: "src/lib/db/providers/sql/search/index.ts",
+  opensearch: "src/lib/db/providers/sql/search/index.ts",
+  oracle: "src/lib/db/providers/sql/oracle/index.ts",
+  db2: "src/lib/db/providers/sql/db2/index.ts",
+  cassandra: "src/lib/db/providers/sql/cassandra/index.ts",
+  couchbase: "src/lib/db/providers/document/couchbase/index.ts",
+  druid: "src/lib/db/providers/sql/druid/index.ts",
+  libredb: "src/lib/db/providers/embedded/libredb.ts",
+  influxdb: "src/lib/db/providers/timeseries/influxdb/influxql-provider.ts",
+  weaviate: "src/lib/db/providers/vector/weaviate/index.ts",
+  qdrant: "src/lib/db/providers/vector/qdrant/index.ts",
+  neo4j: "src/lib/db/providers/graph/neo4j/index.ts",
+  milvus: "src/lib/db/providers/vector/milvus/index.ts",
+  redis: "src/lib/db/providers/keyvalue/redis.ts",
+  etcd: "src/lib/db/providers/keyvalue/etcd/index.ts",
+  oxia: "src/lib/db/providers/keyvalue/oxia/index.ts",
+  rabbitmq: "src/lib/db/providers/stream/rabbitmq/index.ts",
+  kafka: "src/lib/db/providers/stream/kafka/index.ts",
+  s3: "src/lib/db/providers/objectstore/s3/index.ts",
+  firestore: "src/lib/db/providers/document/firestore/index.ts",
+  snmp: "src/lib/db/providers/network/snmp/index.ts",
+  netconf: "src/lib/db/providers/network/netconf/index.ts",
+  modbus: "src/lib/db/providers/industrial/modbus/index.ts",
 };
 
 /**
@@ -584,9 +609,9 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
   const list = namedList(AGENT_EXECUTION_ENGINES.map((type) => getDBConfig(type).label));
   const prose = (relative: string) => read(relative).replace(/\n[ \t]*(?:\*|\/\/|#)?[ \t]*/g, " ");
 
-  test("the derived list is today's ten engines", () => {
+  test("the derived list is today's thirty-three engines", () => {
     expect(list).toBe(
-      "PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes, MongoDB, ClickHouse, libSQL and InfluxDB 3 (SQL)",
+      "PostgreSQL, SQLite, DuckDB, SQL Server, MySQL, Kubernetes, MongoDB, ClickHouse, libSQL, InfluxDB 3 (SQL), Elasticsearch, OpenSearch, Oracle, Db2 LUW, Apache Cassandra, Couchbase, Apache Druid, LibreDB, InfluxDB (InfluxQL), Weaviate, Qdrant, Neo4j, Milvus, Redis, etcd, Oxia, RabbitMQ, Apache Kafka, S3-compatible object storage, Firestore, SNMP, NETCONF and Modbus",
     );
   });
 
@@ -608,6 +633,38 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
   test("each engine on the list has its read-only provider file, and the map has no other key", () => {
     expect(Object.keys(READ_ONLY_PROVIDER_FILES).sort()).toEqual([...AGENT_EXECUTION_ENGINES].sort());
     for (const file of Object.values(READ_ONLY_PROVIDER_FILES)) expect(existsSync(path.join(ROOT, file))).toBe(true);
+  });
+
+  test("the guide's list of the files that define queryReadOnly names each read-only provider file", () => {
+    const sentence = read("docs/AGENT_GUIDE.md").split("`queryReadOnly` exists on ")[1]?.split(/\.\n/)[0] ?? "";
+    for (const file of Object.values(READ_ONLY_PROVIDER_FILES)) {
+      const [parent, base] = file.split("/").slice(-2);
+      expect(sentence).toContain(base === "index.ts" ? `\`${parent}/index.ts\`` : base);
+    }
+  });
+
+  /**
+   * A sentence that lists the files defining `queryReadOnly` (it names both `postgres.ts` and `sqlite.ts`) names every
+   * read-only provider file, in every README translation and agent page, so a list closed with "and nowhere else"
+   * cannot leave out an engine the same sentence's heading names.
+   */
+  test.each(ENGINE_CLAIM_FILES)(
+    "every list of queryReadOnly's files in %s names each read-only provider file",
+    (file) => {
+      const lists = sentencesOf(read(file)).filter(
+        (sentence) => sentence.includes("`postgres.ts`") && sentence.includes("`sqlite.ts`"),
+      );
+      for (const sentence of lists) {
+        for (const provider of Object.values(READ_ONLY_PROVIDER_FILES)) {
+          const [parent, base] = provider.split("/").slice(-2);
+          expect(sentence).toContain(base === "index.ts" ? `${parent}/index.ts\`` : `${base}\``);
+        }
+      }
+    },
+  );
+
+  test("docs/FEATURES.md no longer says the search providers implement no queryReadOnly", () => {
+    expect(read("docs/FEATURES.md")).not.toContain("The search providers implement no `queryReadOnly`");
   });
 
   /**
@@ -666,7 +723,7 @@ describe("every agent-mode engine sentence is the one engine list (#246)", () =>
   );
 
   test("docs/API_DOCS.md quotes the refusal the posture writes for an engine outside the list", () => {
-    const body = agentPosture({ mode: "agent", engine: "oracle", engineLabel: "Oracle", handover: false }).body;
+    const body = agentPosture({ mode: "agent", engine: "spark", engineLabel: "Apache Spark", handover: false }).body;
     expect(read("docs/API_DOCS.md")).toContain(`"error": "${body}"`);
   });
 });
@@ -871,7 +928,28 @@ describe("docs/AGENT.md names every language-pack resolver in its Language packs
   // land without moving this sentence.
   test("its opening sentence counts and names every statement language", () => {
     const ids = Object.keys(AGENT_LANGUAGE_COPY);
-    const COUNT_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    const COUNT_WORDS = [
+      "zero",
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+    ];
     expect(ids.length).toBeLessThan(COUNT_WORDS.length);
     expect(section).toContain(
       `Agent mode reads statements in ${COUNT_WORDS[ids.length]} statement languages, ${namedList(ids.map((id) => `\`${id}\``))}, and what it does differently`,

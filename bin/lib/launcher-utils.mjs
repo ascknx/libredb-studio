@@ -54,7 +54,7 @@ export function mcpUrlFor(hostname, port) {
  * - LIBREDB_EMBEDDED_SAMPLE_PATH: src/lib/seed/libredb-sample.ts
  * - VAULT_K8S_TOKEN_PATH: src/lib/seed/vault-client.ts
  * - WORKFLOW_LOCAL_DATA_DIR, AGENT_MODEL_TUNING_PATH: src/lib/agent/config.ts
- * - ORACLE_CLIENT_LIB_DIR: src/lib/db/providers/sql/oracle.ts (Thick mode libDir)
+ * - ORACLE_CLIENT_LIB_DIR: src/lib/db/providers/sql/oracle/index.ts (Thick mode libDir)
  * - NODE_EXTRA_CA_CERTS: read by Node itself when server.js starts, and checked at boot by src/lib/config/ca-bundle-preflight.ts (docs/OIDC.md)
  * - GOOGLE_APPLICATION_CREDENTIALS: src/lib/db/providers/document/firestore/google-credentials.ts and
  *   src/lib/db/providers/sql/bigquery/auth.ts, each read only on its server-credentials opt-in
@@ -62,6 +62,7 @@ export function mcpUrlFor(hostname, port) {
  * - KUBERNETES_ACCESS_REVIEW_TOKEN_PATH, KUBERNETES_ACCESS_REVIEW_CA_PATH: src/lib/kubernetes-access/config.ts, read
  *   only with the Kubernetes access review on
  * - SEED_KUBERNETES_DISCOVERY_PATH: src/lib/seed/kubernetes-discovery-loader.ts
+ * - OPENSHIFT_OAUTH_TOKEN_FILE, OPENSHIFT_API_CA_FILE: src/lib/openshift-auth/config.ts, read only in openshift sign-in
  *
  * The guard in tests/unit/launcher-utils.test.ts fails when .env.example documents a *_PATH, *_DIR
  * or *_FILE variable that is in none of this list, URL_PATH_VARIABLES and OTHER_PROGRAM_PATH_VARIABLES.
@@ -83,6 +84,8 @@ export const PATH_VARIABLES = Object.freeze([
   "KUBERNETES_ACCESS_REVIEW_TOKEN_PATH",
   "KUBERNETES_ACCESS_REVIEW_CA_PATH",
   "SEED_KUBERNETES_DISCOVERY_PATH",
+  "OPENSHIFT_OAUTH_TOKEN_FILE",
+  "OPENSHIFT_API_CA_FILE",
 ]);
 
 /**

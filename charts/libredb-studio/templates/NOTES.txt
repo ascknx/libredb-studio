@@ -52,6 +52,82 @@ Configuration:
   PostgreSQL:       Built-in (subchart)
 {{- end }}
 
+{{- if include "libredb-studio.openshiftSignIn" . }}
+
+OpenShift sign-in:
+  People sign in with their OpenShift account at https://{{ get (.Values.openshiftRoute | default dict) "host" }}{{ .Values.config.basePath | default "" }};
+  the first sign-in asks each person once to allow Studio's two permissions.
+{{- if include "libredb-studio.operatorManaged" . }}
+  A Studio admin is whoever may update the LibreDBStudio {{ .Release.Namespace }}/{{ .Release.Name }}.
+{{- else }}
+  A Studio admin is whoever may update the Deployment {{ .Release.Namespace }}/{{ include "libredb-studio.fullname" . }}.
+{{- end }}
+{{- if include "libredb-studio.discoveryEnabled" . }}
+  Each person lists only the discovered databases whose credential Secret they may get.
+{{- if include "libredb-studio.networkPolicyEnabled" . }}
+{{- $egressNamespaces := .Values.discovery.kubernetes.namespaces }}
+{{- if .Values.postgresql.enabled }}
+{{- $egressNamespaces = append $egressNamespaces .Release.Namespace }}
+{{- end }}
+  The NetworkPolicy {{ include "libredb-studio.fullname" . }} allows database egress only to {{ join ", " ($egressNamespaces | uniq) }};
+  add other destinations in networkPolicy.additionalEgress, or set networkPolicy.enabled=false.
+{{- else }}
+  WARNING: no NetworkPolicy confines database egress, so the pod reaches any database port on any address.
+  It renders by default in this mode unless networkPolicy.enabled is false, and a --reuse-values upgrade
+  from chart 0.1.113 or earlier carries that release's false: upgrade with --reset-then-reuse-values,
+  or set networkPolicy.enabled=true.
+{{- end }}
+{{- $customConnections := get .Values.config "allowCustomConnections" }}
+{{- if or (kindIs "invalid" $customConnections) (eq (toString $customConnections) "") }}
+  ALLOW_CUSTOM_CONNECTIONS=false: people open discovered and seeded connections only.
+{{- end }}
+{{- end }}
+  openshift.consolePlugin.enabled adds the OpenShift console plugin and openshift.consoleLink.enabled a link to Studio in the console.
+{{- end }}
+
+{{- if include "libredb-studio.consolePluginEnabled" . }}
+{{- $pluginNamespace := .Values.openshift.consolePlugin.namespace }}
+
+OpenShift console plugin: server libredb-studio-console-plugin in {{ $pluginNamespace }}, ConsolePlugin libredb-studio.
+  The console sends every console user's token to that server and runs the plugin in every console
+  session, so only cluster admins may change its Deployment: no RoleBinding in {{ $pluginNamespace }} may
+  name a user or a group of users (the system:deployers, system:image-builders and system:image-pullers
+  bindings OpenShift adds to every namespace are expected). Check who may with
+    oc adm policy who-can update deployments.apps -n {{ $pluginNamespace }}
+{{- if include "libredb-studio.operatorManaged" . }}
+  Under the operator that is the operator's own namespace, the cluster Studio's.
+  A cluster admin turns the plugin on with the console plugin toggle of the operator's install form,
+  or on the console's Console plugins page (Administration > Cluster Settings > Configuration > Console).
+{{- else }}
+  The namespace must be one a cluster admin made with oc create namespace, never a requested project.
+  With the plugin on, {{ .Release.Namespace }} falls under the cluster Studio namespace rule: only cluster admins may hold RoleBindings there
+  (docs/OPENSHIFT.md, "The cluster Studio namespace").
+  The plugin stays off until a cluster admin turns it on, on the console's Console plugins page
+  (Administration > Cluster Settings > Configuration > Console), or with this patch, which adds
+  libredb-studio to spec.plugins once and keeps the other plugins in their order:
+
+    (
+      set -eu
+      plugins=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}')
+      case "$plugins" in *'"libredb-studio"'*) exit 0 ;; esac
+      if [ -z "$plugins" ]; then
+        oc patch consoles.operator.openshift.io cluster --type=json -p '[{"op":"add","path":"/spec/plugins","value":["libredb-studio"]}]'
+      else
+        oc patch consoles.operator.openshift.io cluster --type=json -p '[{"op":"add","path":"/spec/plugins/-","value":"libredb-studio"}]'
+      fi
+    )
+
+  Enabling it restarts the console pods, which may sign people out once.
+{{- end }}
+  On uninstall, remove libredb-studio from spec.plugins as well (docs/OPENSHIFT.md, "Uninstall"):
+  a stale entry trusts the next ConsolePlugin of that name without asking again.
+{{- if not (include "libredb-studio.operatorManaged" .) }}
+  Remove the ConsolePlugin first, with helm uninstall or openshift.consolePlugin.enabled=false,
+  before deleting {{ $pluginNamespace }} or {{ .Release.Namespace }}: a ConsolePlugin outlives them and
+  still names the server's Service, which anyone who may then make a namespace of that name could serve.
+{{- end }}
+{{- end }}
+
 {{- if include "libredb-studio.governanceEnabled" . }}
 
 Governance (docs/GOVERNANCE.md):

@@ -171,6 +171,82 @@ function clausePattern(clause: RegExp): RegExp {
 }
 
 /**
+ * Whether the whitespace run a clause match starts on is the statement's own code
+ * rather than the inside of a comment.
+ *
+ * A clause pattern matches from `\\s+` over the raw text, and a comment can END in
+ * the clause words - `SELECT * FROM t /* FOR UPDATE OF t*\\/ NOWAIT`, where NOWAIT
+ * is a table alias PostgreSQL accepts (an unreserved keyword) - so a match that
+ * STARTS inside that comment strips what is not a clause, and the bound is then
+ * written into the comment while `wasLimited: true` is reported: the statement runs
+ * unbounded. The same shape reaches a line comment, whose text can end in the
+ * clause words (`-- FOR UPDATE\\nNOWAIT`).
+ *
+ * The comment and literal runs of the statement are collected ONCE here, as a
+ * sorted list of intervals, and each clause match is checked against it by binary
+ * search: the strip walks a chain one clause per pass (#1981), and a fresh span
+ * walk per pass made the chain quadratic again - the exact shape #1989 made
+ * linear, and the guard must not give it back. A match covered by an interval is
+ * refused and the clause is left where it stands: the bound keeps its place at
+ * the end.
+ *
+ * One start is legitimate, though - the NEWLINE that closes a line comment. The
+ * comment's interval includes that newline, and a match starting exactly there is
+ * the handoff this module's own design describes: a comment the writer put between
+ * the code and the clause travels with the run and lands between the bound and the
+ * clause, which is why the patterns open with `\\s+` in the first place. A match
+ * starting anywhere before that newline is inside the comment's text and is
+ * refused.
+ */
+class NonCodeRuns {
+  /** Sorted [start, end) intervals of comments and literals; a line comment's includes its newline. */
+  private readonly intervals: ReadonlyArray<readonly [number, number, boolean]> = [];
+
+  constructor(statement: string, grammar: SqlGrammar) {
+    const intervals: Array<[number, number, boolean]> = [];
+    let i = 0;
+
+    while (i < statement.length) {
+      const span = readSqlSpan(statement, i, grammar);
+      if (span === null) {
+        i++;
+        continue;
+      }
+      // The newline that closes a line comment is the legitimate handoff, so the
+      // interval remembers whether its last character is one.
+      const endsInNewline = span.kind === "line-comment" && statement[span.end - 1] === "\n";
+      if (
+        span.kind === "block-comment" ||
+        span.kind === "line-comment" ||
+        span.kind === "string" ||
+        span.kind === "dollar-string"
+      ) {
+        intervals.push([i, span.end, endsInNewline]);
+      }
+      i = span.end;
+    }
+
+    this.intervals = intervals;
+  }
+
+  /** Whether `at` sits inside a comment or a literal, the line comment's closing newline excepted. */
+  covers(at: number): boolean {
+    let lo = 0;
+    let hi = this.intervals.length - 1;
+
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const [start, end, endsInNewline] = this.intervals[mid];
+      if (at < start) hi = mid - 1;
+      else if (at >= end) lo = mid + 1;
+      else return !(endsInNewline && at === end - 1);
+    }
+
+    return false;
+  }
+}
+
+/**
  * The statement with its trailing-clause run removed: the code, the trivia that
  * sat between the code and the clause, and the run itself (#1398).
  *
@@ -218,6 +294,8 @@ function stripTrailingClauses(
   let body = statement;
   let clauseRun = "";
   let clauses = 0;
+  // Built lazily: a statement with no clause match at all never pays for the walk.
+  let nonCode: NonCodeRuns | null = null;
 
   for (;;) {
     let stripped = false;
@@ -225,6 +303,11 @@ function stripTrailingClauses(
       if (clauses === MAX_TRAILING_CLAUSES) break;
       const match = body.match(clausePattern(clause));
       if (match === null || match.index === undefined) continue;
+      // A clause the pattern found inside a comment or a literal is not the
+      // statement's tail; the words stay where they are and the bound keeps
+      // its place at the end rather than being written into them.
+      if (nonCode === null) nonCode = new NonCodeRuns(statement, grammar);
+      if (nonCode.covers(match.index)) continue;
       clauseRun = match[0] + clauseRun;
       body = body.slice(0, match.index);
       stripped = true;
@@ -366,7 +449,7 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
   // statement WRITES, committing at most `limit` of them while the UI reported a
   // truncated result set (#287). The operative keyword is reported as its own type
   // rather than as a blanket OTHER: all three consumers of `type` outside this
-  // module - `sql-base.ts`, `oracle.ts` and `mssql.ts` - test `=== "SELECT"` and
+  // module - `sql-base.ts`, `oracle/index.ts` and `mssql.ts` - test `=== "SELECT"` and
   // nothing else, so the honest answer costs nothing.
   // `MERGE`, which the union cannot name, falls through to OTHER.
   //
@@ -413,17 +496,27 @@ function analyzeUnderGrammar(sql: string, grammar: SqlGrammar): ParsedQueryInfo 
     }
   }
 
-  // Oracle/MSSQL: FETCH FIRST N ROWS ONLY / FETCH NEXT N ROWS ONLY
+  // OFFSET/FETCH row limiting, read as one clause: [OFFSET m [ROW|ROWS]] FETCH {FIRST|NEXT} [n] {ROW|ROWS}
+  // {ONLY|WITH TIES}, an omitted count (`FETCH FIRST ROW ONLY`) meaning 1 row. That is every shape the engines
+  // accept between them, not what each one accepts: PostgreSQL takes all of it, Oracle needs ROW|ROWS after
+  // OFFSET, Db2 has no WITH TIES, and SQL Server takes FETCH only after `OFFSET m {ROW|ROWS}`, always with a count
+  // and only with ONLY. A shape the engine rejects still reads as the statement's own bound and is kept as written
+  // (without forceLimit), so the engine reports its own error rather than one about a clause Studio added.
   if (!hasLimit) {
     const fetchMatch = clauseStripped.match(
-      new RegExp(`\\bFETCH\\s+(?:FIRST|NEXT)\\s+(${value})\\s+ROWS?\\s+ONLY\\s*$`, "i"),
+      new RegExp(
+        `\\b(?:OFFSET\\s+(${value})\\s+(?:ROWS?\\s+)?)?FETCH\\s+(?:FIRST|NEXT)\\s+(?:(${value})\\s+)?ROWS?\\s+(?:ONLY|WITH\\s+TIES)\\s*$`,
+        "i",
+      ),
     );
     if (
       fetchMatch &&
-      (!declaredValue(fetchMatch[1]) || isCodeWordAt(clauseStripped, "FETCH", fetchMatch.index ?? 0, grammar))
+      ((!declaredValue(fetchMatch[1]) && !declaredValue(fetchMatch[2])) ||
+        isCodeWordAt(clauseStripped, fetchMatch[1] !== undefined ? "OFFSET" : "FETCH", fetchMatch.index ?? 0, grammar))
     ) {
       hasLimit = true;
-      existingLimit = boundCount(fetchMatch[1]);
+      existingLimit = fetchMatch[2] === undefined ? 1 : boundCount(fetchMatch[2]);
+      existingOffset = fetchMatch[1] !== undefined ? boundOffset(fetchMatch[1]) : undefined;
     }
   }
 

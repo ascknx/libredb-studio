@@ -129,7 +129,10 @@ secrets:
 # Config — non-sensitive values stored in a ConfigMap
 # =============================================================================
 
-# -- Authentication provider: "local" or "oidc"
+# -- Authentication provider: "local", "oidc" or "openshift". "openshift" signs people in with
+# their OpenShift account through the cluster's OAuth server, with Studio's ServiceAccount as the
+# OAuth client (see "OpenShift sign-in" in README.md): it needs openshiftRoute.enabled with a
+# fixed openshiftRoute.host, one replica, and an application image after 1.1.0.
 authProvider: "local"
 
 config:
@@ -243,13 +246,15 @@ config:
   # verifying it against the identity provider.
   oidcLogoutHint: false
   # -- Session lifetime in seconds, from 300 to 86400. null (the default) writes nothing and
-  # the app keeps 86400; governance installs use 28800.
+  # the app keeps 86400, or 28800 with authProvider=openshift; governance installs use 28800.
   sessionTtlSeconds: null
   # -- ALLOW_CUSTOM_CONNECTIONS, whether a signed-in user may open a connection of their own,
   # one that is not a seed connection. null (the default) writes nothing and the app keeps
   # them on. false switches them off: the server refuses a connection a request supplies and
   # the editor lists seed connections only. Switch it off where Studio shares a network with
   # services its users must not reach. A YAML boolean, not a string. Governance refuses true.
+  # In openshift sign-in mode with Kubernetes discovery on, null writes false: a connection of
+  # a user's own reaches whatever the pod can, past the review of every discovered database.
   # See docs/SEED_CONNECTIONS.md (Custom Connections).
   allowCustomConnections: null
   # -- SEED_LITERAL_VALUES: false (the default) writes nothing; true writes
@@ -315,7 +320,8 @@ governance:
 # version: on the image a default install pulls today, an unset variable resolves
 # to .workflow-data under WORKDIR /app, which is read-only, and every run refuses
 # with LEDGER_UNAVAILABLE. Both name the same path, so the two agree once such an
-# image ships. Override it through extraEnv (written after this, so it wins).
+# image ships. Override it through extraEnv (written after this, so it wins; with Helm 4
+# pass --server-side=false, see the README section on overriding a variable the chart writes).
 #
 # WHERE RUN HISTORY LIVES: in that ledger, under /app/data. With
 # persistence.enabled=false that path is an emptyDir - the agent works, every run
@@ -655,10 +661,85 @@ openshift:
     # -- app.openshift.io/runtime on the same objects, the Topology node icon,
     # e.g. "nodejs". Empty renders no label.
     runtime: ""
+  # openshift sign-in (authProvider: openshift). Nothing here renders in another mode.
+  signIn:
+    # -- Lifetime in seconds, from 600 to 86400, of the projected ServiceAccount token
+    # Studio sends to the OAuth server as its client secret (audience
+    # libredb-studio-oauth-client, never the API server's). The kubelet renews it.
+    tokenExpirationSeconds: 600
+    # -- KUBERNETES_ACCESS_REVIEW_CACHE_SECONDS, how long Studio keeps the answer of a
+    # self review, whole seconds from 0 to 60. null (the default) writes nothing and the
+    # app keeps 15 in this mode.
+    reviewCacheSeconds: null
+    # -- KUBERNETES_ACCESS_REVIEW_SIGN_IN, a review a person must also pass to sign in, as
+    # oc auth can-i takes it: <verb> <resource>[.<group>][/<name>] [-n <namespace>]. Empty
+    # (the default) writes nothing and every account the OAuth server signs in may sign in.
+    review: ""
+  # The Tier 0 link to Studio in the OpenShift web console, a console.openshift.io/v1
+  # ConsoleLink to https://<openshiftRoute.host><config.basePath>. Cluster-scoped, so
+  # installing it needs a cluster admin. Needs console.openshift.io/v1 (or
+  # global.compatibility.openshift.apis=force) and openshiftRoute.host, served by the
+  # release's Route (openshiftRoute.enabled) or one of its ingress.hosts. Every
+  # authenticated user can read ConsoleLinks, so it carries the link, its name and the
+  # chart's common labels, never a discovered namespace.
+  consoleLink:
+    # -- Render the ConsoleLink.
+    enabled: false
+    # -- ApplicationMenu (the console's application launcher) or NamespaceDashboard (the
+    # dashboard of the namespaces below). With discovery on, the ApplicationMenu link is
+    # the one named libredb-studio, which locates the cluster's Studio, and a
+    # NamespaceDashboard link fails the render.
+    location: ApplicationMenu
+    # -- The ApplicationMenu section the link is listed under.
+    section: "LibreDB"
+    # -- The link's text.
+    text: "LibreDB Studio"
+    # -- The ApplicationMenu icon, 24 by 24, as an https URL or a data:image URI. Empty
+    # renders none.
+    imageUrl: ""
+    # -- NamespaceDashboard only: the namespaces whose dashboard shows the link.
+    namespaces: []
+    # -- NamespaceDashboard only: a label selector for those namespaces, used beside or
+    # instead of the list. The render fails when both are empty.
+    namespaceSelector: {}
+  # The OpenShift console plugin (OpenShift 4.19 or later): a Databases page and a details
+  # item that open a database in Studio in a new tab. Renders the plugin's nginx server
+  # (ServiceAccount, Deployment, Service and NetworkPolicy, each named
+  # libredb-studio-console-plugin) in the namespace below and the cluster-scoped
+  # ConsolePlugin libredb-studio. The console sends every console user's token to that
+  # server, so whoever may change its Deployment runs code in every console session: on a
+  # Helm install the render fails in Studio's namespace, in a discovered namespace and in a
+  # project a user requested; under the operator the server runs only in the operator's own
+  # namespace, the cluster Studio's. Needs console.openshift.io/v1 (or
+  # global.compatibility.openshift.apis=force), discovery.kubernetes.enabled and the
+  # ApplicationMenu console link, through which the plugin finds Studio. No Job: a cluster
+  # admin turns the plugin on in the console (README, "The console plugin").
+  consolePlugin:
+    # -- Render the plugin server and the ConsolePlugin.
+    enabled: false
+    # -- Where the plugin server runs: a namespace a cluster admin created with
+    # `oc create namespace` and only cluster admins write. The operator sets its own
+    # namespace (WATCH_NAMESPACE), the cluster Studio namespace, and refuses any other.
+    namespace: ""
+    # -- The plugin image, a whole reference pinned by digest, so a mirror sets one string.
+    # The operator sets it from RELATED_IMAGE_PLUGIN.
+    image: "ghcr.io/libredb/libredb-studio-openshift-plugin:0.1.0@sha256:39698233d019f4e69fe106e634af789291011d59d27d5858a7e4d0b41283d86e"
+    # -- Always, IfNotPresent or Never.
+    imagePullPolicy: IfNotPresent
+    # -- Plugin server replicas, from 1 to 5.
+    replicas: 2
+    # -- requests and limits, each with cpu and memory only.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 50Mi
 
 networkPolicy:
-  # -- Enable NetworkPolicy
-  enabled: false
+  # -- Render the NetworkPolicy. null (the default) renders it only in openshift sign-in mode
+  # with Kubernetes discovery on, where it confines database egress to the discovered
+  # namespaces, and nowhere else; false never renders it (the opt-out in that mode); true
+  # always does.
+  enabled: null
   # -- Additional ingress rules
   additionalIngress: []
   # -- Additional egress rules
@@ -727,6 +808,12 @@ postgresql:
     password: ""
     # -- PostgreSQL database name
     database: "libredb_storage"
+  tls:
+    # -- Serve the bundled PostgreSQL over TLS. Off (the subchart's default), the chart
+    # writes sslmode=disable into STORAGE_POSTGRES_URL; on, it writes no sslmode and
+    # Studio connects with TLS. Turning it on also needs the subchart's certificate
+    # settings (postgresql.tls.autoGenerated or postgresql.tls.certificatesSecret).
+    enabled: false
 
 # =============================================================================
 # Scheduling
@@ -791,7 +878,8 @@ seedConnections:
   existingSecret: ""
   # -- Key within the ConfigMap or Secret containing the YAML config
   configMapKey: "seed-connections.yaml"
-  # -- Cache TTL in milliseconds for config reloading
+  # -- Cache TTL in milliseconds for config reloading (SEED_CACHE_TTL_MS). Ignored in openshift
+  # sign-in mode, which writes no SEED_CACHE_TTL_MS.
   cacheTTL: 60000
 
 # =============================================================================
@@ -869,7 +957,8 @@ discovery:
   # <fullname>-discovery there, so the namespaces must exist) and get and update on
   # the export Secret by name, creates the export Secret <fullname>-discovery-export
   # with no data, mounts it read-only into Studio's pod and writes
-  # SEED_KUBERNETES_DISCOVERY_PATH and SEED_CACHE_TTL_MS (seedConnections.cacheTTL).
+  # SEED_KUBERNETES_DISCOVERY_PATH and SEED_CACHE_TTL_MS (seedConnections.cacheTTL; not in
+  # openshift sign-in mode, where the browser refreshes the list every 10 seconds).
   # Without the access review the discovered databases are listed for admins only.
   # The render fails with no namespace, with governance.enabled, with more than one
   # replica or autoscaling, or with an extraEnv entry named SEED_KUBERNETES_DISCOVERY*.
@@ -880,8 +969,13 @@ discovery:
     namespaces: []
     # -- Time between scans in milliseconds, at least 5000 (KUBERNETES_DISCOVERY_INTERVAL_MS).
     intervalMs: 30000
-    # -- The kinds to discover. Empty (the default) writes nothing and the exporter
-    # reads every supported kind; cnpg is the only one today.
+    # -- The kinds to discover: cnpg (CloudNativePG), edbpg (EDB Postgres for
+    # Kubernetes), pgo (Crunchy PGO) and mongo (MongoDB Community). Empty (the
+    # default) writes nothing and the exporter discovers cnpg alone. Each kind needs
+    # its CRD on the cluster, or every discovered namespace reports crd_missing and is
+    # withdrawn; the exporter's Roles list exactly these kinds. mongo lets the MongoDB
+    # driver follow the replica set members the server advertises, which only an
+    # egress policy confines.
     kinds: []
     # -- SEED_KUBERNETES_DISCOVERY_MAX_AGE_MS: age of the last good scan after which
     # the discovered connections are withdrawn. null (the default) writes nothing and
@@ -889,3 +983,22 @@ discovery:
     maxAgeMs: null
     # -- Resources of the exporter container.
     resources: {}
+    # -- SEED_KUBERNETES_DISCOVERY_CLUSTER_DOMAIN, the cluster's DNS domain every
+    # discovered host ends in, such as cluster.local, when the kubelets run with another
+    # --cluster-domain. null (the default) writes nothing and the app keeps cluster.local.
+    clusterDomain: null
+
+# =============================================================================
+# OLM operator (operator/watches.yaml sets these; a Helm install leaves them)
+# =============================================================================
+operator:
+  # -- Set by the operator for every LibreDBStudio it reconciles. With it set, the chart
+  # renders a cross-namespace or cluster-scoped object (a discovered namespace other than
+  # the release namespace, the ConsoleLink, the access review's ClusterRole and
+  # ClusterRoleBinding, the Rancher NavLink) only for the release in
+  # operator.clusterStudioNamespace, and fails the render otherwise.
+  managed: false
+  # -- The namespace of the one LibreDBStudio allowed cross-namespace and cluster-scoped
+  # objects, which the operator sets to its own namespace, the only one it reconciles.
+  # Empty allows none.
+  clusterStudioNamespace: ""

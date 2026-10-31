@@ -60,11 +60,47 @@ describe("MCP_STATEMENT_ARMS", () => {
     expect(ARMS.map((arm) => arm.tool)).toEqual(["run_read_query", "run_kubectl_read", "run_mongo_command"]);
   });
 
+  test("a language with no MCP tool yet has no arm, and its engine no read tool", () => {
+    expect(MCP_STATEMENT_ARMS.libredbkv).toBeNull();
+    expect(mcpStatementToolFor("libredb")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.influxql).toBeNull();
+    expect(mcpStatementToolFor("influxdb")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.weaviateapi).toBeNull();
+    expect(mcpStatementToolFor("weaviate")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.qdrantapi).toBeNull();
+    expect(mcpStatementToolFor("qdrant")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.cypher).toBeNull();
+    expect(mcpStatementToolFor("neo4j")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.milvusrpc).toBeNull();
+    expect(mcpStatementToolFor("milvus")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.rediscli).toBeNull();
+    expect(mcpStatementToolFor("redis")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.etcdctl).toBeNull();
+    expect(mcpStatementToolFor("etcd")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.oxiacli).toBeNull();
+    expect(mcpStatementToolFor("oxia")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.rabbitread).toBeNull();
+    expect(mcpStatementToolFor("rabbitmq")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.kafkaread).toBeNull();
+    expect(mcpStatementToolFor("kafka")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.s3api).toBeNull();
+    expect(mcpStatementToolFor("s3")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.fsquery).toBeNull();
+    expect(mcpStatementToolFor("firestore")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.snmpget).toBeNull();
+    expect(mcpStatementToolFor("snmp")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.netconfrpc).toBeNull();
+    expect(mcpStatementToolFor("netconf")).toBeNull();
+    expect(MCP_STATEMENT_ARMS.modbusread).toBeNull();
+    expect(mcpStatementToolFor("modbus")).toBeNull();
+  });
+
   test("is built from the languages' MCP facets, one arm per declared facet, in the registry's order", () => {
     expect(Object.keys(MCP_STATEMENT_ARMS)).toEqual(Object.keys(AGENT_LANGUAGE_MCP_FACETS));
     for (const [language, facet] of Object.entries(AGENT_LANGUAGE_MCP_FACETS)) {
       const arm = MCP_STATEMENT_ARMS[language as keyof typeof MCP_STATEMENT_ARMS];
       expect(arm === null).toBe(facet === null);
+      if (facet === null) continue;
       expect(arm?.tool).toBe(facet?.tool);
       expect(arm?.title).toBe(facet?.title);
       expect(arm?.paging).toBe(facet?.paging);
@@ -372,7 +408,27 @@ describe("the tool each engine is read with", () => {
 
   test("an arm that serves no engine is neither listed nor registered", () => {
     const idle = Object.freeze({ ...RUN_MONGO_COMMAND_ARM, types: [] });
-    const arms = { sql: RUN_READ_QUERY_ARM, kubectl: null, mongo: idle };
+    const arms = {
+      sql: RUN_READ_QUERY_ARM,
+      kubectl: null,
+      mongo: idle,
+      libredbkv: null,
+      influxql: null,
+      weaviateapi: null,
+      qdrantapi: null,
+      cypher: null,
+      milvusrpc: null,
+      rediscli: null,
+      etcdctl: null,
+      oxiacli: null,
+      rabbitread: null,
+      kafkaread: null,
+      s3api: null,
+      fsquery: null,
+      snmpget: null,
+      netconfrpc: null,
+      modbusread: null,
+    };
     expect(servingStatementArms(arms)).toEqual([RUN_READ_QUERY_ARM]);
     const registerTool = mock((_name: string) => undefined);
     registerStatementTools({ registerTool } as unknown as McpServer, {} as McpConnectionContext, arms);

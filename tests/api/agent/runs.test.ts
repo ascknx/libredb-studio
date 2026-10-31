@@ -672,13 +672,13 @@ describe("POST /api/agent/runs", () => {
     connection. A blanket refusal would withhold a workflow over a claim that is not
     true of it (#411), which is exactly why the rail's amber card does not gate Start.
   */
-  const UNSUPPORTED_ENGINE = { id: "seed:sample", name: "LibreDB Sample", type: "libredb" };
+  const UNSUPPORTED_ENGINE = { id: "seed:plant", name: "Plant Sparkplug", type: "sparkplug" };
 
   /** The sentence the rail's own pre-start card shows, read from the same module. */
   const unsupportedSentence = agentPosture({
     mode: "agent",
-    engine: "libredb",
-    engineLabel: getDBConfig("libredb").label,
+    engine: "sparkplug",
+    engineLabel: getDBConfig("sparkplug").label,
     handover: false,
   }).body;
 
@@ -754,16 +754,15 @@ describe("POST /api/agent/runs", () => {
     expect(mockStart).toHaveBeenCalledTimes(1);
   });
 
-  test("a Cassandra investigation is refused with the posture's own paragraph", async () => {
-    mockResolveConnection.mockResolvedValueOnce({ id: "seed:docs", name: "Docs", type: "cassandra" });
+  test("a Trino investigation is refused with the posture's own paragraph", async () => {
+    mockResolveConnection.mockResolvedValueOnce({ id: "seed:docs", name: "Docs", type: "trino" });
 
     const res = await POST(startRequest({ ...VALID_BODY, workflowType: "investigation" }));
     const body = await parseResponseJSON<{ error: string; refused?: string }>(res);
 
     expect(res.status).toBe(400);
     expect(body.error).toBe(
-      agentPosture({ mode: "agent", engine: "cassandra", engineLabel: getDBConfig("cassandra").label, handover: false })
-        .body,
+      agentPosture({ mode: "agent", engine: "trino", engineLabel: getDBConfig("trino").label, handover: false }).body,
     );
     // The listed engines include a cluster, which no database bounds, so the refusal
     // promises a declared boundary rather than a database-native one.

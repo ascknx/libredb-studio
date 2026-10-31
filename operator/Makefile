@@ -41,6 +41,12 @@ BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
 # BUNDLE_GEN_FLAGS are the flags passed to the operator-sdk generate bundle command
 BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
 
+# OPENSHIFT_VERSIONS is the com.redhat.openshift.versions value the bundle target
+# stamps into the bundle metadata: the oldest OpenShift release the bundle is
+# offered for, and every later one. 4.16, because no lab runs 4.14 or 4.15, so
+# those are untested.
+OPENSHIFT_VERSIONS ?= v4.16
+
 # USE_IMAGE_DIGESTS defines if images are resolved via tags or digests
 # You can enable this value if you would like to use SHA Based Digests
 # To enable set flag to true
@@ -222,6 +228,28 @@ bundle: kustomize operator-sdk ## Generate bundle manifests and metadata, then v
 	# skipRange" and fail there as a dangling bundle. Verify it landed here.
 	@grep -q "olm.skipRange: '>=0.0.0 <$(VERSION)'$$" bundle/manifests/libredb-studio-operator.clusterserviceversion.yaml || \
 		{ echo "ERROR: olm.skipRange stamp failed - restore the olm.skipRange annotation in config/manifests/bases"; exit 1; }
+	# The operator manages only its own namespace, so the controller watches
+	# the namespace its pod runs in (config/manager/manager.yaml). generate
+	# bundle rewrites every WATCH_NAMESPACE to the olm.targetNamespaces
+	# annotation, which is empty outside OLM and for an all-namespaces group,
+	# and empty means every namespace; put the pod's namespace back.
+	sed -e "s|fieldPath: metadata.annotations\['olm.targetNamespaces'\]$$|fieldPath: metadata.namespace|" \
+		bundle/manifests/libredb-studio-operator.clusterserviceversion.yaml > bundle/manifests/.csv.tmp
+	mv bundle/manifests/.csv.tmp bundle/manifests/libredb-studio-operator.clusterserviceversion.yaml
+	# Verify no annotation reference is left and WATCH_NAMESPACE reads the pod's
+	# namespace exactly once, so a reformatted generator output fails here.
+	@test "$$(grep -c "olm.targetNamespaces" bundle/manifests/libredb-studio-operator.clusterserviceversion.yaml)" = 0 && \
+		test "$$(grep -A3 -e '- name: WATCH_NAMESPACE$$' bundle/manifests/libredb-studio-operator.clusterserviceversion.yaml | grep -c 'fieldPath: metadata.namespace$$')" = 1 || \
+		{ echo "ERROR: WATCH_NAMESPACE stamp failed - the bundle CSV must set it once, from metadata.namespace"; exit 1; }
+	# Stamp the OpenShift floor. The catalogs read com.redhat.openshift.versions
+	# from the bundle metadata, which generate bundle rewrites from scratch on
+	# every run and has no flag for, so it is appended here each time.
+	printf '\n  # The oldest OpenShift release the bundle is offered for, and later ones.\n  com.redhat.openshift.versions: "%s"\n' '$(OPENSHIFT_VERSIONS)' \
+		>> bundle/metadata/annotations.yaml
+	# The catalog tooling only warns about a missing or unparseable value, so
+	# verify it landed, and exactly once in case generate bundle ever keeps it.
+	@test "$$(grep -c '^  com.redhat.openshift.versions: "$(OPENSHIFT_VERSIONS)"$$' bundle/metadata/annotations.yaml)" = 1 || \
+		{ echo "ERROR: com.redhat.openshift.versions stamp failed - bundle/metadata/annotations.yaml must carry it exactly once"; exit 1; }
 	# The operatorframework suite is what the community-operator pipelines run
 	# (operator-pipelines static tests); default validators alone skip the
 	# OperatorHub metadata checks.

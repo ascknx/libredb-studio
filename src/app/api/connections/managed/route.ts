@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { sessionRequiredBody } from "@/lib/api/session-ended";
-import { getPendingSeeds, type ManagedConnection } from "@/lib/seed";
+import { getPendingSeeds, KUBERNETES_REVIEWED_ROLE, type ManagedConnection } from "@/lib/seed";
 import { logger } from "@/lib/logger";
 import { withoutSecretFields } from "@/lib/storage/connection-secrets";
 import { SEED_CONFIG_UNREADABLE_REASON } from "@/hooks/use-connection-payload";
+import { authProviderSetting } from "@/lib/config/auth-provider";
 import { governanceEnabled } from "@/lib/governance/config";
 import { GovernanceUnavailableError, visibleConnections } from "@/lib/governance/visible";
 
@@ -15,29 +16,41 @@ export const dynamic = "force-dynamic";
  * reaches the list within seconds, while the snapshot it is read from is in process memory and costs nothing to ask.
  */
 const GOVERNED_CACHE_HINT_MS = 10_000;
+/**
+ * How often a browser asks again in openshift sign-in mode when SEED_CACHE_TTL_MS is unset: a removed RoleBinding
+ * changes the access review's answer, not the discovery export, so a list follows it within this plus the review's
+ * decision cache (15 seconds there).
+ */
+const OPENSHIFT_CACHE_HINT_MS = 10_000;
 
 /**
  * The server-only markers are not part of this response's shape, so they are removed before anything reaches the
  * browser: the literal marker (src/lib/seed/types.ts) tells the server how to resolve a connection's values, the
- * Kubernetes Secret marker which Secret the access review asks about, and the grant level
- * (src/lib/governance/visible.ts) which credential a governed record carries. The level itself is no secret and goes
- * out as `access`, so a client can say a connection is read only before a write fails.
+ * Kubernetes Secret marker which Secret the access review asks about, the reserved role (src/lib/seed/roles.ts) that
+ * sets a connection apart for that review, so a reviewed connection reaches the browser with no role, and the grant
+ * level (src/lib/governance/visible.ts) which credential a governed record carries. The level itself is no secret and
+ * goes out as `access`, so a client can say a connection is read only before a write fails.
  */
 function withoutServerMarkers(conn: GovernedRecord): ManagedConnection {
   const { grantLevel, ...copy } = conn;
   delete copy.literal;
   delete copy.kubernetesSecret;
+  copy.roles = copy.roles.filter((role) => role !== KUBERNETES_REVIEWED_ROLE);
   return grantLevel === undefined ? copy : { ...copy, access: grantLevel };
 }
 
 /** A listed record: a governed one carries the level of the credential it was resolved for. */
 type GovernedRecord = ManagedConnection & { grantLevel?: "read" | "write" };
 
-/** How long the browser may keep the list, in ms: `SEED_CACHE_TTL_MS`, 60000 by default, and 10000 under governance. */
+/**
+ * How long the browser may keep the list, in ms: 10000 under governance, else `SEED_CACHE_TTL_MS`, by default 10000
+ * in openshift sign-in mode and 60000 otherwise.
+ */
 function cacheHintMs(): number {
   if (governanceEnabled()) return GOVERNED_CACHE_HINT_MS;
   const rawTTL = Number(process.env.SEED_CACHE_TTL_MS);
-  return Number.isFinite(rawTTL) ? rawTTL : 60_000;
+  if (Number.isFinite(rawTTL)) return rawTTL;
+  return authProviderSetting() === "openshift" ? OPENSHIFT_CACHE_HINT_MS : 60_000;
 }
 
 export async function GET() {

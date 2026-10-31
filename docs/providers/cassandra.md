@@ -30,6 +30,7 @@
 | **Verified against** | **Apache Cassandra 5.0.9** (`system.local.release_version`), the official `cassandra:5.0.9` image (the probe ran on the floating `cassandra:5.0` tag, and both tags resolve to the same amd64 manifest digest `sha256:4e806b4457fb`, so pinning the patch changed nothing that was measured), plus a second instance with `PasswordAuthenticator` + `CassandraAuthorizer` and materialized views enabled. Measured 2026-08-20, **before** any provider code existed |
 | **Source** | [`src/lib/db/providers/sql/cassandra/`](../../src/lib/db/providers/sql/cassandra/) |
 | **Tests** | [`tests/integration/db/cassandra-provider.test.ts`](../../tests/integration/db/cassandra-provider.test.ts) + [`tests/unit/db/cassandra/`](../../tests/unit/db/cassandra/) |
+| **Agent mode** | Read-only statements under a role holding only `SELECT` on the connection's keyspace, proven before every statement on Apache Cassandra 5.0; ScyllaDB refused ([§14](#14-agent-mode-a-role-holding-only-select-proven-before-every-statement)) |
 | **Tracking issue** | [#424 — Wire-compatibility and new engines](https://github.com/libredb/libredb-studio/issues/424), Phase 4 |
 
 ---
@@ -747,6 +748,7 @@ Block comments are flat: `SELECT /* a /* b */ id FROM probe.customers WHERE id =
 There is no alternate quoting: `q'{it''s}'` is "no viable alternative at input '{it's}'".
 `//` is a line comment, probed 2026-08-25 on 5.0.9 and on ScyllaDB 2026.2.4, which shares this type id: `SELECT release_version FROM system.local // note; DROP KEYSPACE nope` with a trailing newline returns the row and the `DROP` does not run, and the same text with the `DROP` on the next line is "line 2:0 mismatched input 'DROP' expecting EOF".
 A line comment of either form must end at a newline: `SELECT * FROM probe.customers LIMIT 3 -- note` with nothing after it is "mismatched character '<EOF>'", which is why the provider's `prepareQuery` declines to rewrite a statement that would end inside one.
+A lone carriage return ends a line comment of either form as a line feed does (`lineCommentEndsAtCarriageReturn`), measured on 5.0.9 on 2026-10-30 ([capture 14](../../tests/fixtures/cassandra/5.0.9/agent-boundary/14-line-comment-carriage-return.txt)): `SELECT id FROM fence14.t -- x<CR>WHERE id = 2` and the same with `//` answer no row where the text without the `WHERE` answers one, and `-- x<CR>ALTER ROLE ...` runs the `ALTER ROLE`.
 The row bound goes before `ALLOW FILTERING`, and before ScyllaDB's `BYPASS CACHE` and `USING TIMEOUT`, measured on ScyllaDB 2026.3.2 in the E2E pass of 2026-10-03/04 (#1398): each clause with the bound appended after it is a syntax error, and with the bound before it returns rows.
 `readsSqlText` is `true`, the closest call of all the engines: CQL lacks JOIN, OFFSET, EXPLAIN and subqueries (each a syntax error on 5.0.9), but it writes the same statement keywords, `'...'` literals with doubled quotes, `"..."` names and `--` and block comments, so a SQL span reader finds its literals and comments correctly.
 Redaction is `sql` with no name quote: a redacted statement keeps its words, and every literal and quoted run becomes `?`.
@@ -1321,6 +1323,8 @@ A result set does not know which column is the real key, so the first one is cho
 |---|---|
 | [`tests/integration/db/cassandra-provider.test.ts`](../../tests/integration/db/cassandra-provider.test.ts) | The provider end to end. A session stand-in replays driver ResultSets captured from 5.0.9, so the real provider, the real introspection **and the real driver adapter** all execute |
 | [`tests/unit/db/cassandra/wire.test.ts`](../../tests/unit/db/cassandra/wire.test.ts) | Value normalization, column-type naming and error classification — built with the driver's **own** `Long`, `BigDecimal`, `Duration` and `Vector` classes |
+| [`tests/unit/db/cassandra/agent-boundary.test.ts`](../../tests/unit/db/cassandra/agent-boundary.test.ts) | The agent profile's check of the role: every statement it sends, pinned by full text, and every refusal |
+| [`tests/live/cassandra-agent-boundary.ts`](../../tests/live/cassandra-agent-boundary.ts) | The agent profile's boundary against a live node ([§14.6](#146-boundary-record)); not in `bun run test` |
 | [`tests/unit/db/cassandra/seam-guard.test.ts`](../../tests/unit/db/cassandra/seam-guard.test.ts) | That the driver, its value classes and its per-statement knobs appear in code only in `driver-transport.ts` |
 
 The session stand-in **throws on an unknown statement** rather than answering empty: a provider whose
@@ -1815,6 +1819,87 @@ This engine is a REFUSAL because it was NOT PROBED, and this section says so rat
 Neither wave of #789 ran the two questions an editable Cassandra kind turns on: how a replace behaves across a function's SIGNATURE, and what happens to an aggregate when the function it names is replaced under it.
 Nothing here claims that no strategy exists; it records that nobody measured one, and this phase declares a kind editable only where a failure cannot lose the object and a success destroys nothing the user was not shown, neither of which an unprobed engine can be shown to satisfy.
 No kind here declares `acceptsSourceEdits`, and `tests/isolated/object-edit-declarations.test.ts` is what holds that absence and this section together.
+
+## 14. Agent mode: a role holding only SELECT, proven before every statement
+
+Agent mode executes read-only statements on Apache Cassandra, through `queryReadOnly` in [`index.ts`](../../src/lib/db/providers/sql/cassandra/index.ts) and the check in [`agent-boundary.ts`](../../src/lib/db/providers/sql/cassandra/agent-boundary.ts).
+Every answer below was measured on Apache Cassandra 5.0.9 with `PasswordAuthenticator` and `CassandraAuthorizer`, and recorded in [`tests/fixtures/cassandra/5.0.9/agent-boundary/`](../../tests/fixtures/cassandra/5.0.9/agent-boundary/), which `run.sh` there re-records against fresh containers.
+
+### 14.1 The boundary is the role
+
+CQL has no read-only session or transaction, so the boundary is credential-enforced: the connection's role (the agent user, or the connection's own user when no agent user is set) must hold only `SELECT` on the connection's keyspace or on tables of it.
+The server refuses such a role every `INSERT`, `UPDATE`, `DELETE`, conditional write, `BATCH`, `TRUNCATE`, `CREATE`, `ALTER` and `DROP` of a table, index, view, function, type or keyspace, `GRANT`, `REVOKE` and `CREATE ROLE` as Unauthorized (code 8448), and refuses it a call of a user-defined function or aggregate it holds no `EXECUTE` on (capture 02).
+A function is Cassandra's own by its keyspace, never its name: an unqualified call resolves to a function of that name in the session's keyspace before the built-in one, so a user-defined `probe.now()` took `now()` and `totimestamp(now())` (capture 12), and the server refused both for want of `EXECUTE`, while `system.now()` answered; since the check admits no `EXECUTE`, no user-defined function runs for the agent that way.
+The connection must name a keyspace: the profile reads that one keyspace, and the role's reach is bounded by it.
+Cassandra takes no connection string here ([§4.2](#42-there-is-no-connection-string-and-why-that-is-not-fixable-by-inventing-one)), so an agent credential always comes as an agent user and password.
+
+### 14.2 The check, before every statement
+
+The check runs at the open of a handle that will send statements, and again before every agent statement, on the session that statement runs on, keeping no verdict between calls: a grant added after one call refuses the next, and its removal admits the one after (both proven live).
+It sends, in order:
+
+1. `SELECT release_version FROM system.local`, which must read `5.0.<n>`, and `SELECT key FROM system.versions`, which must be refused as an unknown table. ScyllaDB 2026.2.4 answers `3.0.8` and one `system.versions` row (capture 09), and its enforcement is not measured, so it is refused with `PROFILE_UNSUPPORTED_TARGET`.
+2. `LIST ROLES OF '<role>'`, which lists the role and every role granted to it at any depth (capture 03); a row reading `super` true refuses the role, a superuser granted two levels down included. Never a bare `LIST ROLES`, which lists other roles to a role holding `DESCRIBE` on them.
+3. `LIST ALL PERMISSIONS OF '<role>'`, which lists the permissions of the role and of every role granted to it (capture 03). Every row must be `SELECT` on `<keyspace K>` or `<table K.T>`, K the connection's keyspace as the listing spells it; anything else refuses the role, naming the permission, the resource and the role that holds it: `MODIFY` on a second keyspace, `SELECT` on `<all keyspaces>`, `EXECUTE` on a function, and the reads `UNMASK` and `DESCRIBE` too, since the profile admits one permission. A role holding no `SELECT` there is refused as too narrow. A superuser's own listing answers no columns at all.
+4. `SELECT keyspace_name, table_name, column_name, function_keyspace, function_name FROM system_schema.column_masks WHERE keyspace_name = '<K>'`. A column masked with a function runs that function on the server for every `SELECT` of it, a user-defined Java function included, for a role holding no `EXECUTE` on it (capture 02, where a SELECT-only role read `redacted-by-udf`). Whether the function is Cassandra's own is the catalog's fact, the mask's `function_keyspace`, which reads `system` for the masking functions Cassandra ships; any other keyspace refuses the role. No user keyspace can shadow a `system` or `system_schema` table, since every one is named with its keyspace.
+5. `DROP TABLE IF EXISTS "<K>".libredb_agent_probe_<24 hex>`, a table name made fresh for each check. The role holds no `DROP`, so an enforcing server answers Unauthorized; `AllowAllAuthorizer` accepts it and drops nothing, since no such table exists (capture 07).
+
+Every finding of steps 2 to 4 is named in one refusal (`PROFILE_PRIVILEGES_TOO_BROAD`).
+A read of steps 2 to 4 the server answers with a page state, saying more pages follow, refuses the role the same way, rather than judging it by its first page: the mask read is an ordinary read the driver pages, 5000 rows to a page by default, and at a fetch size of 1 it answered one row and a page state, while both listings answered every row and no page state (capture 13).
+`AllowAllAuthorizer` refuses the permission listing itself ("LIST PERMISSIONS operation is not supported by AllowAllAuthorizer", capture 07), and a server with no authenticator refuses the role listing to an anonymous session (capture 08); each is refused as a server that does not enforce grants (`PROFILE_SERVER_UNENFORCED`).
+A check the server cannot be reached for fails the call as a connection failure, and no statement is sent.
+The operations profile sends no statement, so it opens with no check, and plan mode grounds on a privileged role (proven live).
+
+### 14.3 The statement path
+
+Before any session is opened, the text must be one statement whose first keyword is `SELECT`, in any case, and anything else is refused before it is sent (`cassandraAgentStatementRefusal` in `agent-boundary.ts`).
+The text is read with CQL's own grammar: `--`, `//` and `/* */` comments and whitespace are skipped, and string literals, quoted names and `$$` strings are opaque, so a `;` or a keyword inside one is no code; a code `;` ends the statement and only comments and whitespace may follow it.
+Text that ends inside a comment, a string or a quoted name, a `;` inside a subscript's brackets, and a tagged `$tag$` run, which CQL does not have (a syntax error on 5.0.9, while `$$x; y$$` is one string), are refused too (capture 13).
+A lone carriage return inside a `--` or `//` comment with more text after it is refused before the text is read any further.
+The server ends the comment at that carriage return (capture 14), and so does the grammar the fence reads, but a reader that runs the comment on to the line feed reads another statement: `-- x<CR>ALTER ROLE <role> WITH PASSWORD = '<LF>SELECT id FROM fence14.t WHERE name = ' -- '<LF>` is one `SELECT` to such a reader, and the server ran it, sent as the SELECT-only role, as that role's password change.
+A carriage return paired with its line feed, one inside a block comment or a string, and one with only whitespace after it in the comment are read alike by both, and pass.
+The fence is what stops a role changing its own password ([§14.4](#144-residuals-what-no-grant-stops)), and it refuses a `USE` with every other statement that is not a `SELECT`.
+Each call opens a driver session of its own, runs the check on it, sends the statement on it and closes it, on every path.
+A driver session keeps the keyspace a `USE` moved it to and applies it to every later statement (capture 02), so a session shared between calls would carry what one statement set into the next; the fence refuses a `USE` (proven live), and a session per call keeps anything else a statement sets from reaching the next.
+The statement goes out unprepared, with the budget's deadline as the driver's `readTimeout`, at `LOCAL_ONE`, and with `FallthroughRetryPolicy`, so it is never sent twice; these are `CassandraExecuteOptions` members the driver adapter maps by name.
+It asks for one page of one row past the row budget, and reads only that page: a page past the row budget is refused in the shared row sentence, a page the server says is not the last is refused rather than shown as the whole answer, and a page past the byte budget is refused in the shared byte sentence.
+The deadline ends the wait, not the work: the protocol has no cancellation ([§3.7](#37-there-is-no-cancellation-so-none-is-offered)), so the coordinator finishes what it started.
+An estimating plan is refused before anything is sent, since CQL has no `EXPLAIN`, and so is a call on a handle not opened under the profile.
+
+### 14.4 Residuals: what no grant stops
+
+Two writes are stopped by no grant and by no check of the role.
+
+- A role may always change its own password: `ALTER ROLE <role> WITH PASSWORD = '...'` is accepted from the SELECT-only role (capture 02, and proven live through a driver session of its own), while `SUPERUSER`, `LOGIN` and `OPTIONS` are refused it. 5.0.9 allows it once per 5000 ms. The statement fence of [§14.3](#143-the-statement-path) stops it: `queryReadOnly` refuses it before a session is opened, and the role's password is unchanged after (proven live).
+- The residual: after a `REVOKE`, the server keeps enforcing the revoked permission from its permission cache for up to `permissions_validity` (2000 ms in the image's `cassandra.yaml`), while `LIST ALL PERMISSIONS` shows the revoke at once (capture 05): a refused role whose `MODIFY` is revoked is admitted by the next check while its writes are still accepted for that window. A grant takes the same window to reach enforcement, which only delays a write. To narrow a role safely, create a fresh role holding only `SELECT` rather than revoking from one that wrote.
+
+### 14.5 Agent language pack
+
+Statement-language family: `sql`.
+Overlay: [`src/lib/agent/languages/sql/engines/cassandra.ts`](../../src/lib/agent/languages/sql/engines/cassandra.ts), with its client row in [`src/lib/agent/languages/sql/engines/client.ts`](../../src/lib/agent/languages/sql/engines/client.ts).
+The agent reads it through `runServerPack` and `agentEnginePack`, and the dialect through `engineServerDialect`.
+
+| Member | Kind | Value |
+| --- | --- | --- |
+| `catalogRead` | Dialect-bound | Supplied |
+| `planEstimate` | Dialect-bound | `"unsupported"` |
+| `profileComposition` | Dialect-bound | `"unsupported"` |
+| `statistics` | Dialect-bound | `"unsupported"` |
+| `catalogCapture` | Dialect-bound | `"unsupported"` |
+| `grounding` | Shared | Overridden |
+
+The overlay overrides the `sql` family's grounding: it keeps the family's own and adds three planning rules a plan run on Cassandra is told, CQL's limits a statement written from SQL habits breaks (one table per statement, with no JOIN, subquery, UNION or OFFSET; the partition key restricted first, and `ALLOW FILTERING` last, after `LIMIT`; each table named with its keyspace), and sets `relations` false, since CQL has no foreign key.
+The column kind is a SELECT on `system_schema.columns` for one keyspace, or one of its tables, with its columns renamed `table_schema`, `table_name`, `column_name`, `data_type`, `column_kind` and `ordinal_position` (capture 04); `column_kind` says which columns make the primary key, and `ordinal_position` orders the key columns and reads -1 for every other one.
+CQL has no `NOT IN` to leave the system keyspaces out of a read of every keyspace, so a selector without a keyspace is refused, naming the keyspace as what to give.
+The relation, index and statistics kinds are refused with `SELECTOR_UNSUPPORTED_BY_DIALECT`: CQL has no foreign key, its index catalog names no column a key read could use, and the server keeps no row count it can vouch for ([§3.2](#32-there-is-no-honest-row-count-and-no-honest-size)).
+So investigation, database assessment and data analysis open here and send their statements through `queryReadOnly`, where `inspect_plan` and `profile_table` answer `UNSUPPORTED_DIALECT`; database assessment cannot pass with no table profile ([B146](../BACKLOG.md)), and the `sql-composers` requirement holds query optimization out ([B149](../BACKLOG.md)); plan mode drafts here as on every engine.
+A pack does not open agent mode: execution is gated by `AGENT_EXECUTION_ENGINES` and the execution-profile check.
+MCP's statement read stays closed on Cassandra (`MCP_STATEMENT_READ.cassandra` is false) until a change of its own opens it.
+
+### 14.6 Boundary record
+
+`bun tests/live/cassandra-agent-boundary.ts`, run on 2026-10-30 against a `cassandra:5.0.9` node set up as `run.sh` shows, with a second node on `AllowAllAuthorizer` and a ScyllaDB 2026.2.4 node, passes 94 checks through the production path (`createDatabaseProvider` with the profile's execution context, `connect`, `queryReadOnly`) and with no admission of Studio's in front: the open admits a keyspace and a table reader and refuses each role of step 2 and 3 above and a keyspace with a user-defined mask; each write, DDL, grant and role statement is refused by the fence before it is sent, and each user-defined function and aggregate call, a `SELECT`, passes the fence and is refused by the server as Unauthorized; behind the fence, every one of those statements sent as the role on a driver session of its own is refused as Unauthorized, never as a syntax error, while the superuser runs every one of them on a scratch keyspace; the keyspace's rows, tables and functions and the roles read the same after; the MODIFY role really writes into its second keyspace and a SELECT-only read of a masked column really runs the function; a grant, a superuser role and a mask added after one call each refuse the next and their removal admits the one after; a `USE` is refused before it is sent, and a lowercase `SELECT` behind comments of all three forms answers; both budgets refuse; `AllowAllAuthorizer` and ScyllaDB are refused at open; and the role's change of its own password is refused before it is sent, its old password still signing in, while the same statement on a driver session of its own is accepted.
+Three checks were added on 2026-10-30 and run that day against the `PasswordAuthenticator` node alone, where all 95 checks passed: the password change written after a carriage return in a comment is refused before it is sent and the old password still signs in, while on a driver session of its own the server runs the same text as the password change and the new password signs in.
 
 ## Migration DDL
 

@@ -162,9 +162,9 @@ const SHARED_ENTRIES = new Set(
  * - the reference variant record and the ledger's "the default language is not written" rule (R5c
  *   `DEFAULT_STATEMENT_LANGUAGE`), and a curated call, which is no statement in any language (R5c
  *   `CURATED_CALL_LANGUAGE`);
- * - persisted ids: the `sql-composers` requirement, whose engines are derived from the overlays, and the operation ids
- *   of the SQL arm runtime, which stays in the core. The one in `describePriorProgress` is temporary: it marks B127,
- *   and the B127 fix removes it;
+ * - persisted ids: the `sql-catalog` and `sql-composers` requirements, whose engines are derived from the overlays,
+ *   and the operation ids of the SQL arm runtime, which stays in the core. The one in `describePriorProgress` is
+ *   temporary: it marks B127, and the B127 fix removes it;
  * - the execution gate, which the spec keeps in `AGENT_EXECUTION_ENGINES`;
  * - `postgres` as the `@workflow` durable world, which is no `DatabaseType`;
  * - `libredb` as the MCP server's name in each client's configuration snippet, and as the first word of the MCP server's
@@ -176,10 +176,45 @@ const SHARED_ENTRIES = new Set(
 const ALLOWLIST: Readonly<Record<string, number>> = Object.freeze({
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "kubectl"`]: 1,
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "mongo"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "libredbkv"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "influxql"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "weaviateapi"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "qdrantapi"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "cypher"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "milvusrpc"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "rediscli"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "etcdctl"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "oxiacli"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "rabbitread"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "kafkaread"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "s3api"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "fsquery"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "snmpget"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "netconfrpc"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R1a "modbusread"`]: 1,
   [`${AGENT}/agent-manifest.ts#AgentStatementLanguageId: R5a "sql"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "mongo"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "kubectl"`]: 1,
-  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R5a "sql"`]: 8,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "libredbkv"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "influxql"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "weaviateapi"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "qdrantapi"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "cypher"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "milvusrpc"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "rediscli"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "etcdctl"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "oxiacli"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "rabbitread"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "kafkaread"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "s3api"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "fsquery"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "snmpget"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "netconfrpc"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R1a "modbusread"`]: 1,
+  // The provider capability `queryLanguage`, whose value "influxql" names the editor's language and is spelled as the
+  // pack id; the inventory reads it to write an InfluxQL measurement as "db".."m", the spelling the server reads.
+  [`${AGENT}/context-snapshot.ts#qualifiedName: R1a "influxql"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_STATEMENT_LANGUAGE: R5a "sql"`]: 15,
   [`${AGENT}/agent-manifest.ts#AgentStatementArgument: R5a "sql"`]: 1,
   [`${AGENT}/tools.ts#argument: R5a "sql"`]: 1,
   [`${AGENT}/investigation.ts#planningStatementContract: R5a "sql"`]: 2,
@@ -193,6 +228,9 @@ const ALLOWLIST: Readonly<Record<string, number>> = Object.freeze({
   [`${AGENT}/tools.ts#fingerprint: R5c CURATED_CALL_LANGUAGE`]: 1,
   [`${AGENT}/tools.ts#advice: R5c CURATED_CALL_LANGUAGE`]: 1,
   [`${AGENT}/tools.ts#runAuditedAgentCall: R5c CURATED_CALL_LANGUAGE`]: 1,
+  [`${AGENT}/agent-manifest.ts#AgentVariantRequirement: R5e "sql-catalog"`]: 1,
+  [`${AGENT}/agent-manifest.ts#AGENT_REQUIREMENT_ENGINES: R5e "sql-catalog"`]: 1,
+  [`${AGENT}/agent-manifest.ts#REQUIREMENT_SENTENCES: R5e "sql-catalog"`]: 1,
   [`${AGENT}/agent-manifest.ts#AgentVariantRequirement: R5e "sql-composers"`]: 1,
   [`${AGENT}/agent-manifest.ts#AGENT_REQUIREMENT_ENGINES: R5e "sql-composers"`]: 1,
   [`${AGENT}/agent-manifest.ts#REQUIREMENT_SENTENCES: R5e "sql-composers"`]: 1,
@@ -212,6 +250,29 @@ const ALLOWLIST: Readonly<Record<string, number>> = Object.freeze({
   [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "clickhouse"`]: 1,
   [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "libsql"`]: 1,
   [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "influxdb3"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "elasticsearch"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "opensearch"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "oracle"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "db2"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "cassandra"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "couchbase"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "druid"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "libredb"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "influxdb"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "weaviate"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "qdrant"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "neo4j"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "milvus"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "redis"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "etcd"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "oxia"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "rabbitmq"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "kafka"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "s3"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "firestore"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "snmp"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "netconf"`]: 1,
+  [`${AGENT}/engine-support.ts#AGENT_EXECUTION_ENGINES: R8a "modbus"`]: 1,
   [`${AGENT}/config.ts#AgentDurableBackend: R8a "postgres"`]: 1,
   [`${AGENT}/config.ts#SANCTIONED_WORLD_TARGETS: R8a "postgres"`]: 1,
   [`${AGENT}/config.ts#resolveAgentAvailability: R8a "postgres"`]: 1,
@@ -897,7 +958,26 @@ function absorbedFindings(files: readonly string[], planted: Planted = {}): stri
 
 describe("the agent core names no language a pack owns", () => {
   test("the pack ids come from the manifest", () => {
-    expect(PACK_IDS).toEqual(["kubectl", "mongo"]);
+    expect(PACK_IDS).toEqual([
+      "kubectl",
+      "mongo",
+      "libredbkv",
+      "influxql",
+      "weaviateapi",
+      "qdrantapi",
+      "cypher",
+      "milvusrpc",
+      "rediscli",
+      "etcdctl",
+      "oxiacli",
+      "rabbitread",
+      "kafkaread",
+      "s3api",
+      "fsquery",
+      "snmpget",
+      "netconfrpc",
+      "modbusread",
+    ]);
   });
 
   test("the real core sources yield exactly the allowlisted findings", () => {
@@ -946,7 +1026,7 @@ describe("every engine overlay is declared satisfies its overlay type", () => {
     const exported = sourcesUnder(LANGUAGES)
       .filter((file) => new RegExp(`^${LANGUAGES}/[^/]+/engines/`).test(file))
       .flatMap((file) => Array.from(read(file).matchAll(/^export const (\w+_(SERVER|CLIENT)_OVERLAY)\b/gm)));
-    expect(exported).toHaveLength(20);
+    expect(exported).toHaveLength(66);
   });
 
   test("an overlay that drops its satisfies fails R6", () => {

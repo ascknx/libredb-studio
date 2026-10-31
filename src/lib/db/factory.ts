@@ -275,13 +275,13 @@ export async function createDatabaseProvider(
     }
 
     case "oracle": {
-      const { OracleProvider } = await import("./providers/sql/oracle");
+      const { OracleProvider } = await import("./providers/sql/oracle/index");
       return new OracleProvider(connection, options, execution);
     }
 
     case "db2": {
       const { Db2Provider } = await import("./providers/sql/db2/index");
-      return new Db2Provider(connection, options);
+      return new Db2Provider(connection, options, execution);
     }
 
     case "mssql": {
@@ -302,7 +302,7 @@ export async function createDatabaseProvider(
       // analysable: a bare directory resolves only at runtime, which the bundler
       // cannot trace into a chunk.
       const { DruidProvider } = await import("./providers/sql/druid/index");
-      return new DruidProvider(connection, options);
+      return new DruidProvider(connection, options, execution);
     }
 
     case "trino": {
@@ -344,7 +344,7 @@ export async function createDatabaseProvider(
       // analysable: a bare directory resolves only at runtime, which the bundler
       // cannot trace into a chunk.
       const { CassandraProvider } = await import("./providers/sql/cassandra/index");
-      return new CassandraProvider(connection, options);
+      return new CassandraProvider(connection, options, execution);
     }
 
     // Search engines - two type-ids, ONE implementation module (issue #424 Phase 1).
@@ -353,12 +353,12 @@ export async function createDatabaseProvider(
     // cannot trace into a chunk.
     case "elasticsearch": {
       const { ElasticsearchProvider } = await import("./providers/sql/search/index");
-      return new ElasticsearchProvider(connection, options);
+      return new ElasticsearchProvider(connection, options, execution);
     }
 
     case "opensearch": {
       const { OpenSearchProvider } = await import("./providers/sql/search/index");
-      return new OpenSearchProvider(connection, options);
+      return new OpenSearchProvider(connection, options, execution);
     }
 
     // Document Databases - dynamically imported. The execution context reaches the
@@ -374,20 +374,20 @@ export async function createDatabaseProvider(
       // analysable: a bare directory resolves only at runtime, which the bundler
       // cannot trace into a chunk.
       const { CouchbaseProvider } = await import("./providers/document/couchbase/index");
-      return new CouchbaseProvider(connection, options);
+      return new CouchbaseProvider(connection, options, execution);
     }
 
     case "firestore": {
-      // The explicit /index specifier keeps this dynamic import statically analysable. Read-only whatever the flag
-      // says, so no execution context rides along, as for Neo4j.
+      // The explicit /index specifier keeps this dynamic import statically analysable. The execution context decides
+      // whether the handle answers agent reads, and every surface of an agent-mode handle reads metadata only.
       const { FirestoreProvider } = await import("./providers/document/firestore/index");
-      return new FirestoreProvider(connection, options);
+      return new FirestoreProvider(connection, options, execution);
     }
 
     // Key-Value Stores - dynamically imported
     case "redis": {
       const { RedisProvider } = await import("./providers/keyvalue/redis");
-      return new RedisProvider(connection, options);
+      return new RedisProvider(connection, options, execution);
     }
 
     case "etcd": {
@@ -414,11 +414,12 @@ export async function createDatabaseProvider(
     }
 
     // Two type-ids served by one directory, one per query language (InfluxDB spec I2, I23). Both are read-only
-    // whatever the flag says, so no execution context rides along, as for Neo4j.
+    // whatever the flag says. The execution context decides whether the open proves the principal reads only, for
+    // the agent read-only profile.
     case "influxdb": {
       // The explicit /index specifier keeps this dynamic import statically analysable.
       const { InfluxDBProvider } = await import("./providers/timeseries/influxdb/index");
-      return new InfluxDBProvider(connection, options);
+      return new InfluxDBProvider(connection, options, execution);
     }
 
     case "influxdb3": {
@@ -433,7 +434,7 @@ export async function createDatabaseProvider(
       // analysable: a bare directory resolves only at runtime, which the bundler
       // cannot trace into a chunk.
       const { KafkaProvider } = await import("./providers/stream/kafka/index");
-      return new KafkaProvider(connection, options);
+      return new KafkaProvider(connection, options, execution);
     }
 
     // Graph databases - dynamically imported
@@ -442,7 +443,8 @@ export async function createDatabaseProvider(
       // analysable: a bare directory resolves only at runtime, which the bundler
       // cannot trace into a chunk.
       const { Neo4jProvider } = await import("./providers/graph/neo4j/index");
-      return new Neo4jProvider(connection, options);
+      // The execution context decides whether the open proves the user reads only, for the agent read-only profile.
+      return new Neo4jProvider(connection, options, execution);
     }
 
     // Vector databases - dynamically imported
@@ -483,16 +485,16 @@ export async function createDatabaseProvider(
       return new MqttProvider(connection, options);
     }
 
-    // RabbitMQ: the second member of the stream family, read-only whatever the flag says. No seam is passed: the
-    // provider runs on its production management transport, AMQP dial and clock.
+    // RabbitMQ: the second member of the stream family, read-only whatever the flag says. It reads the execution
+    // context for its agent read path; no seam is passed: it runs on its production transport, AMQP dial and clock.
     case "rabbitmq": {
       // The explicit /index specifier keeps this dynamic import statically analysable.
       const { RabbitMQProvider } = await import("./providers/stream/rabbitmq/index");
-      return new RabbitMQProvider(connection, options);
+      return new RabbitMQProvider(connection, options, execution);
     }
 
     // OPC UA: an industrial address space, browsed level by level. Read-only whatever the flag says,
-    // so no execution context rides along, as for Neo4j.
+    // so no execution context rides along.
     case "opcua": {
       // The explicit /index specifier keeps this dynamic import statically analysable.
       const { OpcuaProvider } = await import("./providers/industrial/opcua/index");
@@ -517,23 +519,23 @@ export async function createDatabaseProvider(
       const { MTConnectProvider } = await import("./providers/industrial/mtconnect/index");
       return new MTConnectProvider(connection, options);
     }
-    // SNMP: an agent on a device, read over UDP by this repository's own client through the
-    // shared egress rule. Read-only not by a flag but by construction: the outgoing valve parses
-    // every datagram and refuses any PDU that is not a Get, GetNext or GetBulk, so a Set never
-    // reaches the socket. No library, so the import is the provider module itself.
+    // SNMP: an agent on a device, read over UDP by this repository's own client through the shared egress rule.
+    // Read-only by construction: the outgoing valve parses every datagram and refuses any PDU that is not a Get,
+    // GetNext or GetBulk, so a Set never reaches the socket. No library, so the import is the provider module itself.
+    // The execution context decides whether the handle answers agent reads; an agent-mode handle refuses the console.
     case "snmp": {
       const { SnmpProvider } = await import("./providers/network/snmp/index");
-      return new SnmpProvider(connection, options);
+      return new SnmpProvider(connection, options, execution);
     }
 
-    // Modbus TCP: a device or a gateway, read over a raw socket by this repository's own client
-    // through the shared egress rule. Read-only whatever the flag says, as for the two above, so
-    // no execution context rides along. No library: the client is ours, so the import is the
-    // provider module and nothing else.
+    // Modbus TCP: a device or a gateway, read over a raw socket by this repository's own client through the shared
+    // egress rule. Read-only by construction: the valve refuses every function code but the four reads and 43/14. No
+    // library, so the import is the provider module. The execution context decides whether the handle answers agent
+    // reads; an agent-mode handle refuses the console and paces the device.
     case "modbus": {
       // The explicit /index specifier keeps this dynamic import statically analysable.
       const { ModbusProvider } = await import("./providers/industrial/modbus/index");
-      return new ModbusProvider(connection, options);
+      return new ModbusProvider(connection, options, execution);
     }
 
     // Platforms - dynamically imported
@@ -550,9 +552,9 @@ export async function createDatabaseProvider(
     // regexes in `tests/isolated/factory.test.ts` anchor on `libredb$`, so a case appended after
     // it breaks checks that have nothing to do with this engine.
     case "netconf": {
-      // The explicit /index specifier keeps this dynamic import statically analysable.
+      // The explicit /index specifier keeps this import statically analysable; the context gates agent reads.
       const { NetconfProvider } = await import("./providers/network/netconf/index");
-      return new NetconfProvider(connection, options);
+      return new NetconfProvider(connection, options, execution);
     }
 
     // Sparkplug B (#1720), the third member of the `industrial/` family. Its own bounded MQTT session
@@ -566,8 +568,10 @@ export async function createDatabaseProvider(
 
     // Embedded databases - dynamically imported
     case "libredb": {
+      // The execution context decides the open: an acquisition that sends statements opens the file through the
+      // read-only adapter, with no writer lock, beside the editor's writer.
       const { LibreDBProvider } = await import("./providers/embedded/libredb");
-      return new LibreDBProvider(connection, options);
+      return new LibreDBProvider(connection, options, execution);
     }
 
     default:
@@ -786,14 +790,16 @@ function fileIdentity(connection: DatabaseConnection): string | null {
  * nothing to lend while the file is open, `isSingleWriterFileOpen` says so, and Test Connection
  * opens a read-only handle rather than a second read-write one.
  *
- * The cost of that is real and is paid by the editor. If an agent run reaches a
- * single-writer connection nobody has browsed yet, `acquireExecutionProfileProvider`
- * opens the file and caches the handle under the PROFILED key; `getOrCreateProvider`
- * then fails on the lock, so browsing that connection in the sidebar is refused until
- * the profiled entry is evicted (30 minutes idle). Lifting it would mean serving an
- * editor request a provider opened under an execution profile, which is the isolation
- * invariant `acquireExecutionProfileProvider` exists to keep - so the lockout is the
- * chosen side of that trade, not an oversight.
+ * The cost of that is real and is paid by the editor. If an operations acquisition reaches
+ * a single-writer connection nobody has browsed yet, `acquireExecutionProfileProvider`
+ * opens the file and caches the handle under the PROFILED key; on LibreDB that handle
+ * takes the writer lock, so `getOrCreateProvider` then fails on it, and browsing that
+ * connection in the sidebar is refused until the profiled entry is evicted (30 minutes
+ * idle). Lifting it would mean serving an editor request a provider opened under an
+ * execution profile, which is the isolation invariant `acquireExecutionProfileProvider`
+ * exists to keep - so the lockout is the chosen side of that trade, not an oversight.
+ * An acquisition that sends statements never takes the lock: LibreDB opens it through
+ * its read-only file adapter, beside the writer and before it.
  */
 export function findOpenSingleWriterProvider(
   connection: DatabaseConnection,
@@ -1367,7 +1373,7 @@ export type ExecutionProfile = "agent-read-only" | "agent-operations" | "agent-h
  * handle or transaction, a least-privilege principal the server's own answers prove, or a
  * Studio-enforced request allowlist plus the identity's own authorization), and only the
  * providers of AGENT_EXECUTION_ENGINES implement that: PostgreSQL, SQLite,
- * DuckDB, SQL Server, MySQL, Kubernetes, MongoDB, ClickHouse, libSQL and InfluxDB 3 (SQL) (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
+ * DuckDB, SQL Server, MySQL, Kubernetes, MongoDB, ClickHouse, libSQL, InfluxDB 3 (SQL), Elasticsearch, OpenSearch, Oracle, Db2 LUW, Apache Cassandra, Couchbase, Apache Druid, LibreDB, InfluxDB (InfluxQL), Weaviate, Qdrant, Neo4j, Milvus, Redis, etcd, Oxia, RabbitMQ, Apache Kafka, S3-compatible object storage, Firestore, SNMP, NETCONF and Modbus (`src/lib/agent/engine-support.ts`). `agent-operations` sends no statement
  * at all — it calls the curated reporting methods every provider implements — so
  * requiring a read-only STATEMENT path of it would refuse an engine over a capability
  * the profile never uses. `agent-handover` sends a statement too — the one a run
@@ -1622,8 +1628,11 @@ export async function acquireExecutionProfileProvider(
     Two bounds keep the isolation invariant intact. It is scoped to the profile that
     sends NO statement of the model's: `agent-operations` calls the curated reporting
     methods only, so there is nothing here for a read-only statement path to bound,
-    and `agent-read-only` / `agent-handover` are still refused on such an engine
-    rather than served the writable handle. And it is refused when the connection
+    and `agent-read-only` / `agent-handover` are never served the writable handle. They
+    open their own instead, which on a single-writer engine is a second handle the lock
+    refuses unless the engine opens it without one: LibreDB opens a handle that sends
+    statements through its read-only file adapter, which takes no lock and cannot write,
+    so it opens beside the held writer. And it is refused when the connection
     configures an agent credential, because the borrowed handle was opened under the
     connection's own - a reuse cannot silently substitute one principal for another.
 

@@ -48,7 +48,11 @@ import {
   sqlQueryReadDescriptor,
   sqlTableProfileDescriptor,
 } from "@/lib/db/operations/descriptors";
-import { agentPlanExecutionSqlInput, agentReadSqlInput } from "@/lib/db/operations/statement-guard";
+import {
+  agentPlanExecutionSqlInput,
+  agentQueryReadSqlInput,
+  agentReadSqlInput,
+} from "@/lib/db/operations/statement-guard";
 import { createTargetScope } from "@/lib/db/operations/policy";
 import * as errorModule from "@/lib/db/errors";
 import {
@@ -59,6 +63,7 @@ import {
   ExecutionProfileError,
   PoolExhaustedError,
   QueryError,
+  RefusedBeforeSendError,
   TimeoutError,
 } from "@/lib/db/errors";
 import { mapDatabaseError } from "@/lib/db/map-database-error";
@@ -333,7 +338,9 @@ describe("selectAgentTools — the server decides, from the persisted mode and w
       ]
         .filter(
           (descriptor) =>
-            descriptor.inputSchema === agentReadSqlInput || descriptor.inputSchema === agentPlanExecutionSqlInput,
+            descriptor.inputSchema === agentReadSqlInput ||
+            descriptor.inputSchema === agentQueryReadSqlInput ||
+            descriptor.inputSchema === agentPlanExecutionSqlInput,
         )
         .map((descriptor) => descriptor.id),
     );
@@ -2807,10 +2814,10 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
 
     await expect(
       executeAgentOperation(
-        { ...h.context, statementLanguage: "cypher" as AgentStatementLanguageId },
+        { ...h.context, statementLanguage: "gremlin" as AgentStatementLanguageId },
         { operationId: "sql.query.read", sql: "MATCH (n) RETURN n" },
       ),
-    ).rejects.toThrow("no server adapter for cypher");
+    ).rejects.toThrow("no server adapter for gremlin");
     expect(reached).toBe(false);
   });
 
@@ -2939,6 +2946,43 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
 
     expect(outcome.modelText).toContain(UNTRUSTED_CONTENT_BEGIN);
     expect(outcome.modelText.split(UNTRUSTED_CONTENT_END)).toHaveLength(2);
+  });
+
+  test("a refusal the provider raised before sending is settled as not sent, in this server's voice", async () => {
+    const sentence = "Read-only execution refused the statement before sending it: not-a-real-fence";
+    const h = harness({}, async () => {
+      throw new RefusedBeforeSendError(sentence, "postgres", "SELECT * FROM fenced()");
+    });
+
+    const outcome = await runReadQueryTool(h.context, { sql: "SELECT * FROM fenced()" });
+
+    if (outcome.kind !== "refused" || outcome.refusal.class !== "database-error") {
+      throw new Error(`expected a database error, got ${JSON.stringify(outcome)}`);
+    }
+    // Still a statement the run spent and a repair attempt, since the rewrite is the model's to author, but recorded
+    // as never sent, so the rail and a resumed run do not attribute the provider's sentence to the database.
+    expect(outcome.refusal.sent).toBe(false);
+    expect(outcome.refusal.message).toBe(sentence);
+    expect(h.repairs.attemptsUsed).toBe(1);
+    expect(outcome.modelText).not.toContain(UNTRUSTED_CONTENT_BEGIN);
+    expect(outcome.modelText).toContain(sentence);
+    expect(outcome.modelText).toContain("refused by this server before it was sent; the database was not asked");
+    // The fence's own advice, not the read allowance's: the repair is a different statement, not a smaller read.
+    expect(outcome.modelText).toContain("Draft a statement that does not do what the refusal names");
+    expect(outcome.modelText).not.toContain("cannot pay for a read that large");
+  });
+
+  test("an error the database raised is not marked as never sent", async () => {
+    const h = harness({}, async () => {
+      throw new QueryError('column "ordr_id" does not exist', "postgres", "SELECT ordr_id FROM orders");
+    });
+
+    const outcome = await runReadQueryTool(h.context, { sql: "SELECT ordr_id FROM orders" });
+
+    if (outcome.kind !== "refused" || outcome.refusal.class !== "database-error") {
+      throw new Error(`expected a database error, got ${JSON.stringify(outcome)}`);
+    }
+    expect(outcome.refusal.sent).toBeUndefined();
   });
 
   test("a statement timeout is repairable in the same way", async () => {
@@ -3174,6 +3218,8 @@ describe("runReadQueryTool — a database error is repairable, bounded, and neve
       QueryError: "repairable",
       // A QueryError of its own class: dropping the offset, or narrowing the statement, is the repair.
       OffsetUnsupportedError: "repairable",
+      // Refused by the provider before the statement was sent: a statement that avoids what the refusal names is the repair.
+      RefusedBeforeSendError: "repairable",
       // Refused before the read was sent: a smaller read that fits what the run's read allowance has left is the repair.
       ReadAllowanceExceededError: "repairable",
       TimeoutError: "repairable",
@@ -3369,7 +3415,7 @@ describe("inspectSchemaTool — the server composes the catalog statement", () =
   });
 
   test("a dialect with no verified catalog composition is reported the same way", async () => {
-    const h = harness({ connection: { ...connection, type: "oracle" } });
+    const h = harness({ connection: { ...connection, type: "spark" } });
 
     const outcome = await inspectSchemaTool(h.context, {});
 
@@ -5341,7 +5387,7 @@ function curatedHarness(
     actor: { sessionId: "session-1", role: "user" },
     // A connection type with no read-only statement path at all, which is the whole
     // point: this is the engine the other tools are refused on.
-    connection: { ...connection, type: "oracle" },
+    connection: { ...connection, type: "spark" },
     capabilities,
     labels: TABLE_LABELS,
     registry: createCanonicalOperationRegistry(),

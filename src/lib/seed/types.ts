@@ -23,9 +23,13 @@ const SSLConfigSchema = z
 
 const ConnectionEnvironmentSchema = z.enum(["production", "staging", "development", "local", "other"]);
 
-// Allowed roles: standard roles ('*', 'admin', 'user') or custom roles from OIDC role claim
-const CONTROL_CHAR_REGEX = /[\x00-\x1f\x7f-\x9f]/;
+/**
+ * A C0 or C1 control character or DEL. A seed role name may hold none (AllowedRoleSchema), and seedRolesOf
+ * (src/lib/seed/roles.ts) drops a claim role holding one, so the two refuse one class.
+ */
+export const CONTROL_CHAR_REGEX = /[\x00-\x1f\x7f-\x9f]/;
 
+// Allowed roles: standard roles ('*', 'admin', 'user') or custom roles from OIDC role claim
 const AllowedRoleSchema = z
   .string()
   .min(1, "Role cannot be empty")
@@ -282,6 +286,19 @@ export const SeedConnectionSchema = z
      */
     securityMode: z.enum(["None", "Sign", "SignAndEncrypt"]).optional(),
     serverCertificateThumbprint: z.string().optional(),
+    /**
+     * NETCONF only: the device's SSH host key pin, `SHA256:` and base64 as `ssh-keygen -lf` prints it. The provider
+     * refuses an empty pin (RFC 6242 section 6), so a seed without it can never be opened. Not a secret: the device
+     * publishes its host key, so it is a literal and never resolved from a reference.
+     */
+    hostKeyFingerprint: z.string().optional(),
+    /**
+     * Modbus only: the register map, the JSON document the provider parses, saved byte for byte. Declared for the
+     * reason skipObjectScan is: zod strips an undeclared key in silence, and a seeded connection without its map has
+     * no named point to read. Not a secret: Modbus TCP defines no authentication, so it is a literal and never
+     * resolved from a reference.
+     */
+    registerMap: z.string().optional(),
     // And the three OPC UA fields the dialog has no box for: why, at SEED_ONLY_FIELDS.opcua in src/lib/db/connection-fields.ts.
     securityPolicyUri: z.string().optional(),
     clientCertificatePath: z.string().optional(),
@@ -428,9 +445,10 @@ export interface ManagedConnection extends DatabaseConnection {
   /**
    * The Kubernetes Secret this connection's credentials come from. Set in code after the role filter, by a Kubernetes
    * discovery source, as `literal` is; never read from a file, because SeedConnectionSchema does not declare it;
-   * stripped by GET /api/connections/managed. With the Kubernetes access review on, the connection is listed and opened
-   * only for a session the review allows to `get` this Secret, and with it off for the admin role only
-   * (src/lib/kubernetes-access/gate.ts).
+   * stripped by GET /api/connections/managed. With the Kubernetes access review on, the connection carries
+   * KUBERNETES_REVIEWED_ROLE and is listed and opened only for a session the review allows to `get` this Secret
+   * (src/lib/kubernetes-access/gate.ts), and with it off for the admin role only, through the role filter
+   * (src/lib/seed/index.ts).
    */
   kubernetesSecret?: { readonly namespace: string; readonly name: string };
   /**

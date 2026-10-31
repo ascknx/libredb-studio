@@ -2,17 +2,20 @@
  * Search HTTP transport endpoints (Elasticsearch and OpenSearch)
  *
  * The rest of this transport is exercised through the two provider suites under
- * tests/integration/db. This file pins only how its URLs are built: the host and
- * port are validated when the transport is constructed, and a redirect is refused
- * rather than followed.
+ * tests/integration/db. This file pins how its URLs are built (the host and port are
+ * validated when the transport is constructed, and a redirect is refused rather than
+ * followed), how a 401 or 403 is read, and how a bounded statement pages, stops and
+ * closes its cursor.
  *
  * globalThis.fetch is replaced per test and restored in afterEach; mock.module()
  * is deliberately not used, since it is process-wide in bun.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ConnectionError, DatabaseConfigError } from "@/lib/db/errors";
 import { SearchHttpTransport } from "@/lib/db/providers/sql/search/http-transport";
-import { SearchTransportError } from "@/lib/db/providers/sql/search/transport";
+import { SearchBoundsError, SearchTransportError } from "@/lib/db/providers/sql/search/transport";
 import type { DatabaseConnection, DatabaseType } from "@/lib/db/types";
 
 interface FetchCall {
@@ -202,5 +205,629 @@ describe.each(["elasticsearch", "opensearch"] as const)("SearchHttpTransport (%s
       const error = await failureOf(status, body);
       expect(error.category).toBe("auth");
     }
+  });
+});
+
+/**
+ * A bounded statement, against a fake cluster that answers the SQL endpoint from a queue of pages and the cursor
+ * close with the acknowledgement Elasticsearch 9.1.4 sends (measured: `{"succeeded":true}`). Each page is the
+ * product's own envelope, so the rows go through the same rebuild the editor's statements do.
+ */
+describe.each(["elasticsearch", "opensearch"] as const)("SearchHttpTransport (%s) bounded query", (dialect) => {
+  const CLOSE_PATH = dialect === "elasticsearch" ? "/_sql/close" : "/_plugins/_sql/close";
+
+  /** One page in this product's envelope: `k` keyword rows, and a cursor when one is given. */
+  function page(values: readonly string[], cursor?: string, withColumns = true): string {
+    const columns = [{ name: "k", type: "keyword" }];
+    const rows = values.map((value) => [value]);
+    const envelope =
+      dialect === "elasticsearch"
+        ? { ...(withColumns ? { columns } : {}), rows }
+        : { schema: columns, datarows: rows, total: rows.length, size: rows.length, status: 200 };
+    return JSON.stringify(cursor === undefined ? envelope : { ...envelope, cursor });
+  }
+
+  let pages: string[] = [];
+  let closeStatus = 200;
+
+  beforeEach(() => {
+    pages = [];
+    closeStatus = 200;
+    handler = (url) =>
+      new URL(url).pathname === CLOSE_PATH
+        ? new Response('{"succeeded":true}', { status: closeStatus, headers: { "content-type": "application/json" } })
+        : new Response(pages.shift() ?? "{}", { headers: { "content-type": "application/json" } });
+  });
+
+  function transport(): SearchHttpTransport {
+    return new SearchHttpTransport(dialect, makeConnection(dialect));
+  }
+
+  const bodies = (): Record<string, unknown>[] =>
+    calls.map((call) => JSON.parse(String(call.init?.body)) as Record<string, unknown>);
+  const paths = (): string[] => calls.map((call) => new URL(call.url).pathname);
+
+  async function refusal(promise: Promise<unknown>): Promise<SearchBoundsError> {
+    const caught = await promise.catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(SearchBoundsError);
+    return caught as SearchBoundsError;
+  }
+
+  test("returns an answer inside both bounds whole, in one request", async () => {
+    pages = [page(["a", "b"])];
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 });
+
+    expect(result.rows).toEqual([{ k: "a" }, { k: "b" }]);
+    expect(result.fieldNames).toEqual(["k"]);
+    expect(bodies()[0]).toMatchObject({ query: "SELECT k FROM t" });
+    expect(calls).toHaveLength(1);
+  });
+
+  if (dialect === "elasticsearch") {
+    test("asks for one row past the row bound", async () => {
+      pages = [page(["a", "b"])];
+      await transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 });
+
+      expect(bodies()[0]).toMatchObject({ query: "SELECT k FROM t", fetch_size: 4 });
+    });
+  } else {
+    test("asks for no page size, since one breaks the engine's aggregations", async () => {
+      // Measured on 3.8.0: with `fetch_size`, a GROUP BY fails ("invalid value operation on MISSING_VALUE") or is
+      // answered by the older engine, which cuts it at 200 rows with no cursor; without one, both answer whole.
+      pages = [page(["a", "b"])];
+      await transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 });
+
+      expect(bodies()[0]).toEqual({ query: "SELECT k FROM t" });
+    });
+  }
+
+  test("an answer at exactly the row bound is returned", async () => {
+    pages = [page(["a", "b", "c"])];
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 });
+
+    expect(result.rows).toHaveLength(3);
+  });
+
+  if (dialect === "elasticsearch") {
+    test("never asks for a page past the cluster's default result window", async () => {
+      pages = [page([])];
+      await transport().queryBounded("SELECT k FROM t", { maxRows: 50_000, maxBytes: 1_000 });
+
+      expect(bodies()[0]?.fetch_size).toBe(10_000);
+    });
+  }
+
+  test("a page past the row bound closes the cursor it carries, then refuses with the rows read", async () => {
+    pages = [page(["a", "b", "c", "d"], "c1")];
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 }));
+
+    expect([error.bound, error.measured, error.allowed]).toEqual(["row", 4, 3]);
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+    expect(bodies().at(-1)).toEqual({ cursor: "c1" });
+  });
+
+  test("a page past the row bound with no cursor closes nothing", async () => {
+    pages = [page(["a", "b", "c", "d"])];
+    await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 }));
+
+    expect(paths()).not.toContain(CLOSE_PATH);
+  });
+
+  test("follows a short page's cursor, keeps page one's columns, and stops on the page that crosses the bound", async () => {
+    pages = [page(["a"], "c1"), page(["b", "c"], "c2", false), page(["d"], "c3", false)];
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 }));
+
+    expect([error.measured, error.allowed]).toEqual([4, 3]);
+    expect(bodies().slice(1, 3)).toEqual([{ cursor: "c1" }, { cursor: "c2" }]);
+    expect(bodies().at(-1)).toEqual({ cursor: "c3" });
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+  });
+
+  test("returns every page when the cursor runs out inside the bounds", async () => {
+    pages = [page(["a"], "c1"), page(["b"], undefined, false)];
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 });
+
+    expect(result.rows).toEqual([{ k: "a" }, { k: "b" }]);
+    expect(paths()).not.toContain(CLOSE_PATH);
+  });
+
+  test("rows past the byte bound close the cursor and refuse with the bytes the rows measure as JSON", async () => {
+    pages = [page(["aaaa", "bbbb"], "c1")];
+    // [{"k":"aaaa"},{"k":"bbbb"}] is 27 bytes.
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 26 }));
+
+    expect([error.bound, error.measured, error.allowed]).toEqual(["byte", 27, 26]);
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+  });
+
+  test("rows that measure exactly the byte bound are returned", async () => {
+    pages = [page(["aaaa", "bbbb"])];
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 27 });
+
+    expect(result.rows).toHaveLength(2);
+  });
+
+  test("a body past its cap is abandoned unread and refused with the bytes read", async () => {
+    // The cap is three times the byte bound plus 64 KiB; this body is past it on its own.
+    pages = [page(["x".repeat(70_000)])];
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 10 }));
+
+    expect(error.bound).toBe("byte");
+    expect(error.measured).toBeGreaterThan(10 * 3 + 65_536);
+    expect(error.allowed).toBe(10);
+  });
+
+  test("the cap alone refuses a body whose rows are inside the byte bound, and stops reading it", async () => {
+    // Row bytes stay far under the bound; the envelope carries the bulk, so only the body cap can refuse this page.
+    const padded = `${page(["a"]).slice(0, -1)},"pad":"${"x".repeat(200_000)}"}`;
+    const chunk = 40_000;
+    let pulled = 0;
+    handler = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const start = pulled * chunk;
+            if (start >= padded.length) {
+              controller.close();
+              return;
+            }
+            controller.enqueue(new TextEncoder().encode(padded.slice(start, start + chunk)));
+            pulled += 1;
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    // The cap is 100 * 3 + 65,536 = 65,836 bytes, crossed by the second 40,000-byte chunk.
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 100 }));
+
+    expect([error.bound, error.measured, error.allowed]).toEqual(["byte", 80_000, 100]);
+    expect(pulled).toBeLessThan(Math.ceil(padded.length / chunk));
+  });
+
+  test("a body under its cap is read whole, even when its envelope alone is past the byte bound", async () => {
+    // 85,000 bytes of envelope: under the cap of 10,000 * 3 + 65,536, and past 10,000 + 65,536.
+    pages = [`${page(["a"]).slice(0, -1)},"pad":"${"x".repeat(85_000)}"}`];
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 10_000 });
+
+    expect(result.rows).toEqual([{ k: "a" }]);
+  });
+
+  test("an empty first page adds no comma before the first row a later page brings", async () => {
+    pages = [page([], "c1"), page(["aaaa", "bbbb"], undefined, false)];
+    // [{"k":"aaaa"},{"k":"bbbb"}] is 27 bytes, exactly the bound.
+    const result = await transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 27 });
+
+    expect(result.rows).toHaveLength(2);
+  });
+
+  test("a later page the cluster refuses closes the cursor the page before it left open", async () => {
+    pages = [page(["a"], "c1")];
+    handler = (url) => {
+      if (new URL(url).pathname === CLOSE_PATH) {
+        return new Response('{"succeeded":true}', { headers: { "content-type": "application/json" } });
+      }
+      const next = pages.shift();
+      return next === undefined
+        ? new Response('{"error":{"type":"search_phase_execution_exception"}}', { status: 500 })
+        : new Response(next, { headers: { "content-type": "application/json" } });
+    };
+    const caught = await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 })
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+    expect(bodies().at(-1)).toEqual({ cursor: "c1" });
+  });
+
+  test("an unreadable later page closes the cursor the page before it left open", async () => {
+    pages = [page(["a"], "c1"), "[]"];
+    await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 })
+      .catch((error: unknown) => error);
+
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+    expect(bodies().at(-1)).toEqual({ cursor: "c1" });
+  });
+
+  test("a later page past its cap closes the cursor the page before it left open", async () => {
+    // Page one's rows measure 11 bytes, inside the bound of 20; page two is past the cap of 20 * 3 + 65,536.
+    pages = [page(["a"], "c1"), page(["x".repeat(70_000)], "c2", false)];
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 10, maxBytes: 20 }));
+
+    expect(error.bound).toBe("byte");
+    expect(error.measured).toBeGreaterThan(20 * 3 + 65_536);
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+    expect(bodies().at(-1)).toEqual({ cursor: "c1" });
+  });
+
+  test("a deadline that ends on a later page still closes the cursor, on a signal of its own", async () => {
+    const controller = new AbortController();
+    pages = [page(["a"], "c1")];
+    handler = (url) => {
+      if (new URL(url).pathname === CLOSE_PATH) {
+        return new Response('{"succeeded":true}', { headers: { "content-type": "application/json" } });
+      }
+      const next = pages.shift();
+      if (next === undefined) {
+        controller.abort(new DOMException("deadline", "TimeoutError"));
+        throw new DOMException("deadline", "TimeoutError");
+      }
+      return new Response(next, { headers: { "content-type": "application/json" } });
+    };
+    const caught = await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 }, controller.signal)
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as SearchTransportError).category).toBe("timeout");
+    const close = calls.at(-1);
+    expect(new URL(close?.url ?? "").pathname).toBe(CLOSE_PATH);
+    expect(close?.init?.signal?.aborted).toBe(false);
+  });
+
+  test("a refused cursor close does not hide the bound the answer went past", async () => {
+    closeStatus = 500;
+    pages = [page(["a", "b"], "c1")];
+    const error = await refusal(transport().queryBounded("SELECT k FROM t", { maxRows: 1, maxBytes: 1_000 }));
+
+    expect(error.bound).toBe("row");
+  });
+
+  test("a cursor that never runs out is closed and refused after the page limit", async () => {
+    pages = Array.from({ length: 1_001 }, (_, index) => page([], `c${index}`));
+    const caught = await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 })
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as Error).message).toContain("more result pages than this connection will follow");
+    expect(paths().at(-1)).toBe(CLOSE_PATH);
+  });
+
+  test("an unreadable page is refused as the editor's statements are", async () => {
+    pages = ["[]"];
+    const caught = await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 })
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+  });
+
+  test("an unreadable later page is refused too", async () => {
+    pages = [page(["a"], "c1"), "[]"];
+    const caught = await transport()
+      .queryBounded("SELECT k FROM t", { maxRows: 3, maxBytes: 1_000 })
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+  });
+});
+
+/** One capture of tests/fixtures/opensearch/<version>/delete-setting/, written by tests/live/opensearch-write-refusals.ts. */
+function deleteSettingCapture(version: string, name: string): { status: number; body: string } {
+  const file = join(import.meta.dir, "../../../fixtures/opensearch", version, "delete-setting", `${name}.json`);
+  return JSON.parse(readFileSync(file, "utf8")) as { status: number; body: string };
+}
+
+/**
+ * The DELETE switch: OpenSearch's SQL grammar holds a DELETE that the `plugins.sql.delete.enabled` setting turns on
+ * (2.19.4, measured; 3.8.0 no longer recognizes the setting), so the open of an agent read-only connection reads the
+ * setting and sends one DELETE on a fresh name. The answers below are the captured ones.
+ */
+describe("SearchHttpTransport (opensearch) DELETE switch", () => {
+  let reply: { status: number; body: string } = { status: 200, body: "{}" };
+
+  beforeEach(() => {
+    reply = { status: 200, body: "{}" };
+    handler = () => new Response(reply.body, { status: reply.status, headers: { "content-type": "application/json" } });
+  });
+
+  function transport(): SearchHttpTransport {
+    return new SearchHttpTransport("opensearch", makeConnection("opensearch"));
+  }
+
+  test("reads the setting from the cluster settings, defaults included, filtered to the one key", async () => {
+    await transport().sqlDeleteSetting();
+
+    const url = new URL(calls[0]?.url ?? "");
+    expect(url.pathname).toBe("/_cluster/settings");
+    expect(url.searchParams.get("include_defaults")).toBe("true");
+    expect(url.searchParams.get("filter_path")).toBe("*.plugins.sql.delete.enabled");
+    expect(calls[0]?.init?.method ?? "GET").toBe("GET");
+  });
+
+  test.each([
+    ["3.8.0", "setting-default", null],
+    ["3.8.0", "setting-after-on-write", null],
+    ["2.19.4", "setting-default", false],
+    ["2.19.4", "setting-after-on-write", true],
+  ] as const)("%s %s reads %p", async (version, name, value) => {
+    reply = deleteSettingCapture(version, name);
+
+    expect(await transport().sqlDeleteSetting()).toEqual({ setting: "plugins.sql.delete.enabled", enabled: value });
+  });
+
+  test.each([
+    [
+      "a transient value over the persistent and the default",
+      { transient: "true", persistent: "false", defaults: "false" },
+      true,
+    ],
+    ["a persistent value over the default", { persistent: "true", defaults: "false" }, true],
+    ["a transient false over a persistent true", { transient: "false", persistent: "true" }, false],
+    ["a JSON boolean", { defaults: false }, false],
+  ] as const)("reads %s", async (_name, levels, value) => {
+    const body = Object.fromEntries(
+      Object.entries(levels).map(([level, enabled]) => [level, { plugins: { sql: { delete: { enabled } } } }]),
+    );
+    reply = { status: 200, body: JSON.stringify(body) };
+
+    expect(await transport().sqlDeleteSetting()).toEqual({ setting: "plugins.sql.delete.enabled", enabled: value });
+  });
+
+  test.each([
+    [
+      "a value that is not a boolean",
+      JSON.stringify({ defaults: { plugins: { sql: { delete: { enabled: "maybe" } } } } }),
+    ],
+    ["a level that is not an object", JSON.stringify({ defaults: "false" })],
+    ["a body that is not an object", "[]"],
+  ])("refuses %s as unreadable", async (_name, body) => {
+    reply = { status: 200, body };
+
+    const caught = await transport()
+      .sqlDeleteSetting()
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as Error).message).toBe(
+      "OpenSearch answered the plugins.sql.delete.enabled setting the client could not read",
+    );
+  });
+
+  test("a 403 on the settings read is the cluster's refusal, not a value", async () => {
+    reply = { status: 403, body: SECURITY_BODY };
+
+    const caught = await transport()
+      .sqlDeleteSetting()
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as SearchTransportError).category).toBe("auth");
+  });
+
+  test("sends one DELETE on a fresh name no index holds, to the SQL endpoint", async () => {
+    reply = deleteSettingCapture("3.8.0", "missing-index-setting-off");
+    const probe = transport();
+    await probe.unrefusedSqlDelete();
+    await probe.unrefusedSqlDelete();
+
+    const statements = calls.map((call) => (JSON.parse(String(call.init?.body)) as { query: string }).query);
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual(["/_plugins/_sql", "/_plugins/_sql"]);
+    for (const statement of statements) expect(statement).toMatch(/^DELETE FROM libredb_delete_probe_[0-9a-f]{32}$/);
+    expect(statements[0]).not.toBe(statements[1]);
+  });
+
+  test.each([
+    ["3.8.0", "missing-index-setting-off"],
+    ["3.8.0", "missing-index-setting-on"],
+    ["2.19.4", "missing-index-setting-off"],
+  ] as const)("%s %s: a measured refusal answers null", async (version, name) => {
+    const captured = deleteSettingCapture(version, name);
+    // The capture's statement named the capture's index; the probe names its own, and the refusal quotes it.
+    handler = (_url) => {
+      const statement = (JSON.parse(String(calls.at(-1)?.init?.body)) as { query: string }).query;
+      return new Response(captured.body.replaceAll("DELETE FROM libredb_wr_no_such_index", statement), {
+        status: captured.status,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    expect(await transport().unrefusedSqlDelete()).toBeNull();
+  });
+
+  test("2.19.4 with the setting on: the missing-index answer is not a refusal, and is returned", async () => {
+    reply = deleteSettingCapture("2.19.4", "missing-index-setting-on");
+
+    expect(await transport().unrefusedSqlDelete()).toContain("IndexNotFoundException");
+  });
+
+  test("a DELETE that answered rows is not a refusal, and is returned", async () => {
+    reply = deleteSettingCapture("2.19.4", "scratch-index-setting-on");
+
+    expect(await transport().unrefusedSqlDelete()).toContain("deleted_rows");
+  });
+
+  test.each([
+    ["another fault name", sqlFaultBody("ParserException", "Illegal SQL expression")],
+    [
+      "the measured fault name with another statement in its detail",
+      sqlFaultBody(
+        "SQLFeatureNotSupportedException",
+        "Query must start with SELECT, DELETE, SHOW or DESCRIBE: DELETE FROM x",
+      ),
+    ],
+    ["a missing index", sqlFaultBody("IndexNotFoundException", "no such index")],
+  ])("%s is not a refusal, and is returned", async (_name, body) => {
+    reply = { status: 400, body };
+
+    const answer = await transport().unrefusedSqlDelete();
+
+    expect(answer).not.toBeNull();
+    expect(answer).toContain(JSON.parse(body).error.type);
+  });
+
+  test.each([
+    ["a 403", 403, SECURITY_BODY, "auth"],
+    ["a 401", 401, SECURITY_BODY, "auth"],
+  ] as const)(
+    "%s on the DELETE is the cluster's refusal of the request, thrown",
+    async (_name, status, body, category) => {
+      reply = { status, body };
+
+      const caught = await transport()
+        .unrefusedSqlDelete()
+        .catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(SearchTransportError);
+      expect((caught as SearchTransportError).category).toBe(category);
+    },
+  );
+
+  test("Elasticsearch, whose grammar holds no DELETE, refuses both before any request", async () => {
+    const elasticsearch = new SearchHttpTransport("elasticsearch", makeConnection("elasticsearch"));
+
+    for (const call of [() => elasticsearch.sqlDeleteSetting(), () => elasticsearch.unrefusedSqlDelete()]) {
+      const caught = await call().catch((error: unknown) => error);
+      expect(caught).toBeInstanceOf(SearchTransportError);
+      expect((caught as Error).message).toBe("Elasticsearch SQL holds no DELETE behind a setting");
+    }
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/** An OpenSearch SQL plugin fault body. */
+function sqlFaultBody(type: string, details: string): string {
+  return JSON.stringify({ error: { reason: "Invalid SQL query", details, type }, status: 400 });
+}
+
+/**
+ * The result limit: OpenSearch's SQL plugin answers at most `plugins.query.size_limit` rows and cuts the rest with no
+ * sign of the cut (measured on 3.8.0 with the setting at 1000: a 1,500-row read answers 1,000 rows and a cursor whose
+ * next page is empty, and a 1,500-group aggregation answers 1,000 rows and no cursor), so the open of an agent
+ * read-only connection reads the limit, and an answer that reaches it is refused rather than returned cut.
+ */
+describe("SearchHttpTransport (opensearch) result limit", () => {
+  let reply: { status: number; body: string } = { status: 200, body: "{}" };
+
+  beforeEach(() => {
+    handler = () => new Response(reply.body, { status: reply.status, headers: { "content-type": "application/json" } });
+  });
+
+  function transport(): SearchHttpTransport {
+    return new SearchHttpTransport("opensearch", makeConnection("opensearch"));
+  }
+
+  test("reads the setting from the cluster settings, defaults included, filtered to the one key", async () => {
+    reply = { status: 200, body: '{"defaults":{"plugins":{"query":{"size_limit":"10000"}}}}' };
+
+    expect(await transport().sqlResultLimit()).toEqual({ setting: "plugins.query.size_limit", rows: 10_000 });
+    const url = new URL(calls[0]?.url ?? "");
+    expect(url.pathname).toBe("/_cluster/settings");
+    expect(url.searchParams.get("filter_path")).toBe("*.plugins.query.size_limit");
+  });
+
+  test("a transient value wins over the default, as a JSON number too", async () => {
+    reply = {
+      status: 200,
+      body: '{"transient":{"plugins":{"query":{"size_limit":1000}}},"defaults":{"plugins":{"query":{"size_limit":"10000"}}}}',
+    };
+
+    expect(await transport().sqlResultLimit()).toEqual({ setting: "plugins.query.size_limit", rows: 1_000 });
+  });
+
+  test.each([
+    ["an empty answer", "{}"],
+    ["a value that is not a whole number", '{"defaults":{"plugins":{"query":{"size_limit":"ten"}}}}'],
+    ["a value below one", '{"defaults":{"plugins":{"query":{"size_limit":"0"}}}}'],
+  ])("refuses %s as unreadable", async (_name, body) => {
+    reply = { status: 200, body };
+
+    const caught = await transport()
+      .sqlResultLimit()
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as Error).message).toBe(
+      "OpenSearch answered the plugins.query.size_limit setting the client could not read",
+    );
+  });
+
+  test("Elasticsearch, which declares no such limit, refuses before any request", async () => {
+    const caught = await new SearchHttpTransport("elasticsearch", makeConnection("elasticsearch"))
+      .sqlResultLimit()
+      .catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as Error).message).toBe("Elasticsearch SQL declares no result limit setting");
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * A refusal inside a 200: OpenSearch's SQL plugin answers some refusals with HTTP 200 and its error envelope, the
+ * refusal's own status in the body. Read as a success, the envelope would be an answer with no rows.
+ */
+describe("SearchHttpTransport (opensearch) refusal inside a 200", () => {
+  /** Measured on 3.8.0 with security on: `DESCRIBE TABLES LIKE %` by a user missing `indices:admin/get` on an index. */
+  const SECURITY_IN_200 = JSON.stringify({
+    error: {
+      reason:
+        "Error occurred in OpenSearch engine: no permissions for [indices:admin/get] and User [name=libredb_agent, backend_roles=[], requestedTenant=null]",
+      details:
+        "OpenSearchSecurityException[no permissions for [indices:admin/get] and User [name=libredb_agent, backend_roles=[], requestedTenant=null]]\nFor more details, please send request for Json format to see the raw response from OpenSearch engine.",
+      type: "OpenSearchSecurityException",
+    },
+    status: 403,
+  });
+
+  beforeEach(() => {
+    handler = () => new Response(SECURITY_IN_200, { status: 200, headers: { "content-type": "application/json" } });
+  });
+
+  const transport = (): SearchHttpTransport => new SearchHttpTransport("opensearch", makeConnection("opensearch"));
+
+  test.each([
+    ["query", () => transport().query("DESCRIBE TABLES LIKE %")],
+    ["queryBounded", () => transport().queryBounded("DESCRIBE TABLES LIKE %", { maxRows: 10, maxBytes: 1_000 })],
+  ] as const)("%s throws the refusal the body carries, by the body's status", async (_name, run) => {
+    const caught = await run().catch((error: unknown) => error);
+
+    expect(caught).toBeInstanceOf(SearchTransportError);
+    expect((caught as SearchTransportError).category).toBe("auth");
+    expect((caught as Error).message).toBe("OpenSearch refused the credentials (HTTP 403)");
+  });
+
+  test("a 2.19.4 DELETE with the setting on, answered 200 with a missing-index fault, is that fault", async () => {
+    // The body 2.19.4 answered `DELETE FROM libredb_wr_no_such_index` with the setting on (tests/fixtures/opensearch/).
+    handler = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            reason: "Error occurred in OpenSearch engine: no such index [x]",
+            details: "[x] IndexNotFoundException[no such index [x]]",
+            type: "IndexNotFoundException",
+          },
+          status: 404,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    const caught = await transport()
+      .query("DELETE FROM x")
+      .catch((error: unknown) => error);
+
+    expect((caught as SearchTransportError).category).toBe("unknown-object");
+    expect((caught as SearchTransportError).engineType).toBe("IndexNotFoundException");
+  });
+
+  test("a 200 whose status member is a success, or whose error member is not an envelope, is an answer", async () => {
+    handler = () =>
+      new Response(JSON.stringify({ schema: [{ name: "error", type: "keyword" }], datarows: [["x"]], status: 200 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    expect((await transport().query("SELECT error FROM t")).rows).toEqual([{ error: "x" }]);
+
+    handler = () =>
+      new Response(
+        JSON.stringify({ schema: [{ name: "k", type: "keyword" }], datarows: [], error: "x", status: 500 }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    expect((await transport().query("SELECT k FROM t")).rows).toEqual([]);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AGENT_STATEMENT_LANGUAGE, workflowAvailability } from "@/lib/agent/agent-manifest";
+import type { AgentCatalogKind, AgentCatalogRead, AgentCatalogSelector } from "@/lib/agent/composed-sql-primitives";
 import { AGENT_EXECUTION_ENGINES } from "@/lib/agent/engine-support";
 import { AGENT_WORKFLOW_BUDGETS } from "@/lib/agent/execution-policy";
 import { verifyRunGoal } from "@/lib/agent/goal-verifier";
@@ -8,8 +9,11 @@ import { runServerPack } from "@/lib/agent/languages/engines/server";
 import type { AgentEnginePack, AgentEngineServerDialect } from "@/lib/agent/languages/pack";
 import { REFERENCE_RECOMMENDATION_CARD } from "@/lib/agent/languages/server";
 import { type AgentToolName, agentToolDefinition } from "@/lib/agent/tools";
-import type { AgentRunWorkflowType } from "@/lib/agent/types";
+import { AGENT_WORKFLOW_SENDS_STATEMENTS, type AgentRunWorkflowType } from "@/lib/agent/types";
 import { createCanonicalOperationRegistry } from "@/lib/db/operations/descriptors";
+import { admitComposedStatement, agentQueryReadSqlInput } from "@/lib/db/operations/statement-guard";
+import { DEFAULT_SQL_GRAMMAR, resolveSqlGrammar, type SqlGrammar } from "@/lib/sql/grammar";
+import { readSqlSpan } from "@/lib/sql/spans";
 import type { DatabaseType } from "@/lib/types";
 import { toolsNamedIn } from "../../../helpers/agent-tool-rules";
 
@@ -56,7 +60,306 @@ const UNSERVED_OFFERS: Readonly<Partial<Record<DatabaseType, readonly AgentToolN
   duckdb: ["profile_table"],
   clickhouse: ["profile_table"],
   influxdb3: ["profile_table"],
+  // The catalog-only workflows open on Elasticsearch and offer both; it composes no estimating plan and no profile.
+  elasticsearch: ["inspect_plan", "profile_table"],
+  // The same on OpenSearch, for the same reasons.
+  opensearch: ["inspect_plan", "profile_table"],
+  // And on Oracle, whose EXPLAIN PLAN writes into PLAN_TABLE, refused to its read-only user.
+  oracle: ["inspect_plan", "profile_table"],
+  // And on Db2, whose EXPLAIN writes into the explain tables, which the agent user may not write.
+  db2: ["inspect_plan", "profile_table"],
+  // And on Cassandra, since CQL has no EXPLAIN.
+  cassandra: ["inspect_plan", "profile_table"],
+  // And on Couchbase, since the agent path sends only a SELECT, never an EXPLAIN.
+  couchbase: ["inspect_plan", "profile_table"],
+  // And on Druid, for the same reason.
+  druid: ["inspect_plan", "profile_table"],
 };
+
+/**
+ * The engines whose catalog read maps the engine's own rows into the catalog rows the core reads, exactly: an engine
+ * whose catalog statement answers under column names no SELECT can rename. Held both ways, so an engine that gains a
+ * mapper is named here and held to the mapper contract below.
+ */
+const MAPPED_CATALOG_READS: readonly DatabaseType[] = ["elasticsearch", "opensearch"];
+
+const CATALOG_KINDS: readonly AgentCatalogKind[] = ["columns", "relations", "indexes", "statistics"];
+
+/** Engine answers no mapper may throw on: none, an empty row, and a row of names it never asked for. */
+const MAPPER_CORPUS: readonly (readonly Record<string, unknown>[])[] = [[], [{}], [{ unexpected: 1, other: null }]];
+
+/** A row set no mapper can write into: the rows and the array are frozen, so a write throws. */
+const frozenRows = (rows: readonly Record<string, unknown>[]): readonly Record<string, unknown>[] =>
+  Object.freeze(rows.map((row) => Object.freeze({ ...row })));
+
+/**
+ * What a catalog read's row mapper gets wrong over every kind and the corpus; empty when it holds. A mapper is pure:
+ * it never throws on an engine answer, never writes into it, answers the same rows twice, keeps no row it was not given
+ * (the budget was spent on the engine's rows), and keys every row by the columns it declares, which are named and
+ * distinct like any `QueryResult`'s.
+ */
+function catalogMapperViolations(mapRows: NonNullable<AgentCatalogRead["mapRows"]>): string[] {
+  const violations: string[] = [];
+  for (const kind of CATALOG_KINDS) {
+    for (const rows of MAPPER_CORPUS) {
+      const where = `${kind} ${JSON.stringify(rows)}`;
+      let first: ReturnType<typeof mapRows>;
+      try {
+        first = mapRows(kind, frozenRows(rows));
+      } catch (error) {
+        violations.push(`${where}: throws ${(error as Error).message}`);
+        continue;
+      }
+      if (first.fields.length === 0 || first.fields.some((field) => field.length === 0)) {
+        violations.push(`${where}: an unnamed column`);
+      }
+      if (new Set(first.fields).size !== first.fields.length) violations.push(`${where}: a repeated column`);
+      if (first.rows.length > rows.length) violations.push(`${where}: more rows than it was given`);
+      for (const row of first.rows) {
+        for (const key of Object.keys(row)) {
+          if (!first.fields.includes(key)) violations.push(`${where}: a cell under an undeclared column ${key}`);
+        }
+      }
+      if (JSON.stringify(mapRows(kind, frozenRows(rows))) !== JSON.stringify(first)) {
+        violations.push(`${where}: a second call answers differently`);
+      }
+    }
+  }
+  return violations;
+}
+
+describe("the catalog row mapper contract", () => {
+  test("holds for a mapper that renames the engine's own columns", () => {
+    const renaming: NonNullable<AgentCatalogRead["mapRows"]> = (_kind, rows) => ({
+      fields: ["table_name", "column_name"],
+      rows: rows.map((row) => ({ table_name: row.TABLE_NAME ?? null, column_name: row.COLUMN_NAME ?? null })),
+    });
+    expect(catalogMapperViolations(renaming)).toEqual([]);
+  });
+
+  test("names each way a mapper can break it", () => {
+    let calls = 0;
+    const broken: NonNullable<AgentCatalogRead["mapRows"]> = (kind, rows) => {
+      calls += 1;
+      if (kind === "statistics") throw new Error("no statistics");
+      if (kind === "indexes" && rows.length > 0) (rows[0] as Record<string, unknown>).written = true;
+      return {
+        fields: kind === "relations" ? ["", "name", "name"] : ["name"],
+        rows: [...rows.map(() => ({ name: "t", extra: calls })), { name: "invented" }],
+      };
+    };
+    const violations = catalogMapperViolations(broken);
+    expect(violations).toContain("statistics []: throws no statistics");
+    expect(violations.some((violation) => violation.startsWith("indexes [{}]: throws"))).toBe(true);
+    expect(violations).toContain("relations []: an unnamed column");
+    expect(violations).toContain("relations []: a repeated column");
+    expect(violations).toContain("columns []: more rows than it was given");
+    expect(violations).toContain("columns [{}]: a cell under an undeclared column extra");
+    expect(violations).toContain("columns [{}]: a second call answers differently");
+  });
+});
+
+test("the mapped catalog reads name only engines that speak a language", () => {
+  for (const type of MAPPED_CATALOG_READS) expect(ENGINES).toContain(type);
+});
+
+/**
+ * The engines whose catalog read is a command rather than a SELECT (`AgentCatalogRead.commandShaped`), exactly. Held
+ * both ways, so an engine that declares it is named here and held to the composer contract below.
+ */
+const COMMAND_CATALOG_READS: readonly DatabaseType[] = ["elasticsearch", "opensearch"];
+
+/** A name no composer writes on its own, so where it shows in a composed statement, a selector put it there. */
+const SENTINEL_NAME = "zq_sentinel_name";
+
+/**
+ * Names a composer is handed: the sentinel, and for each delimiter a grammar reads as quoting (single and double
+ * quotes, backticks, brackets) three ways out of it: one that ends the statement or opens a comment, one that closes
+ * the quote and goes on in plain words, and one that keeps the sentinel quoted and puts plain words after the quote.
+ * The last two carry no terminator and no comment, so only the quoting check below catches a composer that lets them
+ * through.
+ */
+const COMMAND_NAMES: readonly string[] = [
+  SENTINEL_NAME,
+  `${SENTINEL_NAME}'; SHOW TABLES --`,
+  `${SENTINEL_NAME}"; SHOW TABLES /*`,
+  `${SENTINEL_NAME}\`; SHOW TABLES --`,
+  `${SENTINEL_NAME}]; SHOW TABLES /*`,
+  ...[
+    ["'", "'"],
+    ['"', '"'],
+    ["`", "`"],
+    ["[", "]"],
+  ].flatMap(([open, close]) => [`x${close} ${SENTINEL_NAME} ${open}y`, `${SENTINEL_NAME}${close} IN ${open}other`]),
+];
+
+/** A quoted run's content, its doubled closers undoubled, or null for a run not quoted that way. */
+function decodedQuote(run: string): string | null {
+  const close = { "'": "'", '"': '"', "`": "`", "[": "]" }[run[0] ?? ""];
+  if (close === undefined || run.length < 2 || !run.endsWith(close)) return null;
+  const body = run.slice(1, -1);
+  return body.replaceAll(close + close, "").includes(close) ? null : body.replaceAll(close + close, close);
+}
+
+/**
+ * What a composed statement's quoting gets wrong for `name`, read with `grammar`: the sentinel shows outside every
+ * literal and quoted name (in code, a comment or a subscript), or a literal or quoted name holding it is not exactly
+ * `name` once its doubled delimiters are undone, so words outside the quote went with it.
+ */
+function quotingViolations(sql: string, name: string, grammar: SqlGrammar): string[] {
+  const violations = new Set<string>();
+  let unquoted = "";
+  let i = 0;
+  while (i < sql.length) {
+    const span = readSqlSpan(sql, i, grammar);
+    if (span === null) {
+      unquoted += sql[i];
+      i++;
+      continue;
+    }
+    const run = sql.slice(i, span.end);
+    if (!span.terminated) violations.add("a run its grammar never closes");
+    if (span.kind !== "string" && span.kind !== "quoted-identifier") unquoted += run;
+    else if (run.includes(SENTINEL_NAME) && decodedQuote(run) !== name) {
+      violations.add("a quoted name that is not the name it was given");
+    }
+    i = span.end;
+  }
+  if (unquoted.includes(SENTINEL_NAME)) violations.add("a name it does not quote");
+  return [...violations];
+}
+
+/**
+ * What a command catalog read's composers get wrong over every kind and name; empty when they hold. Each statement it
+ * composes is one the fence admits by identity (one determinate statement, no comment, no forbidden word), and every
+ * name it takes sits inside one literal or quoted name that holds exactly that name, read with each of `grammars`. A
+ * composer that refuses a name, by throwing, holds: a refusal sends nothing.
+ *
+ * The fence reads quoting with `DEFAULT_SQL_GRAMMAR`, where brackets quote a name, and an engine reads it with its own
+ * row, where they may be a subscript, so a declaring engine is held under both (`resolveSqlGrammar`).
+ */
+function commandComposerViolations(
+  compose: AgentCatalogRead["compose"],
+  grammars: readonly SqlGrammar[] = [DEFAULT_SQL_GRAMMAR],
+): string[] {
+  const violations = new Set<string>();
+  for (const kind of CATALOG_KINDS) {
+    for (const name of COMMAND_NAMES) {
+      for (const selector of [
+        { kind, table: name },
+        { kind, schema: name },
+        { kind, schema: name, table: name },
+      ]) {
+        let sql: string;
+        try {
+          sql = compose[kind](selector);
+        } catch {
+          continue;
+        }
+        const where = `${kind} ${JSON.stringify(selector)}`;
+        if (!agentQueryReadSqlInput.safeParse({ sql, composed: admitComposedStatement(sql) }).success) {
+          violations.add(`${where}: not one statement the fence admits by identity`);
+        }
+        for (const grammar of grammars) {
+          for (const violation of quotingViolations(sql, name, grammar)) violations.add(`${where}: ${violation}`);
+        }
+      }
+    }
+  }
+  return [...violations];
+}
+
+/** One composer for every kind. */
+const composingAll = (composer: (selector: AgentCatalogSelector) => string): AgentCatalogRead["compose"] => ({
+  columns: composer,
+  relations: composer,
+  indexes: composer,
+  statistics: composer,
+});
+
+/** The name quoted as an identifier, its own quotes doubled. */
+const quotedName = (name: string): string => `"${name.replaceAll('"', '""')}"`;
+
+describe("the command catalog read contract", () => {
+  test("holds for composers that quote every name, or refuse it", () => {
+    const quoting = composingAll((selector) =>
+      selector.table === undefined ? "SHOW TABLES" : `SHOW COLUMNS FROM ${quotedName(selector.table)}`,
+    );
+    expect(commandComposerViolations(quoting)).toEqual([]);
+    const refusing = composingAll(() => {
+      throw new Error("not a name this engine takes");
+    });
+    expect(commandComposerViolations(refusing)).toEqual([]);
+  });
+
+  test("names each way a composer can break it", () => {
+    const unquoting = composingAll((selector) => `SHOW COLUMNS FROM ${selector.table ?? selector.schema}`);
+    expect(commandComposerViolations(unquoting)).toContain(
+      `columns {"kind":"columns","table":"${SENTINEL_NAME}"}: a name it does not quote`,
+    );
+    expect(commandComposerViolations(unquoting)).toContain(
+      `columns {"kind":"columns","table":"${SENTINEL_NAME}'; SHOW TABLES --"}: not one statement the fence admits by identity`,
+    );
+    const commented = composingAll(() => "SHOW TABLES /* the catalog */");
+    expect(commandComposerViolations(commented)).toContain(
+      `relations {"kind":"relations","schema":"${SENTINEL_NAME}"}: not one statement the fence admits by identity`,
+    );
+    const twoStatements = composingAll(() => "SHOW TABLES; SHOW COLUMNS");
+    expect(commandComposerViolations(twoStatements)).toContain(
+      `indexes {"kind":"indexes","table":"${SENTINEL_NAME}"}: not one statement the fence admits by identity`,
+    );
+  });
+
+  // A composer that wraps a name in a delimiter and never escapes it, one per delimiter the grammar reads as quoting.
+  test.each([
+    ["backticks", "`", "`"],
+    ["brackets", "[", "]"],
+    ["double quotes", '"', '"'],
+    ["single quotes", "'", "'"],
+  ])("names a composer that wraps a name in %s without escaping it", (_label, open, close) => {
+    const unescaped = composingAll(
+      (selector) => `SHOW COLUMNS FROM ${open}${selector.table ?? selector.schema}${close}`,
+    );
+    const violations = commandComposerViolations(unescaped);
+    // The quote closed early and the name goes on in plain words, no terminator and no comment.
+    expect(violations).toContain(
+      `columns ${JSON.stringify({ kind: "columns", table: `x${close} ${SENTINEL_NAME} ${open}y` })}: a name it does not quote`,
+    );
+    // The name stays quoted, and words of the model's choosing follow the quote.
+    expect(violations).toContain(
+      `columns ${JSON.stringify({ kind: "columns", table: `${SENTINEL_NAME}${close} IN ${open}other` })}: a quoted name that is not the name it was given`,
+    );
+  });
+
+  test("holds for composers that escape their own delimiter, whichever it is", () => {
+    for (const [open, close] of [
+      ["`", "`"],
+      ["[", "]"],
+      ['"', '"'],
+      ["'", "'"],
+    ]) {
+      const escaping = composingAll(
+        (selector) => `SHOW COLUMNS FROM ${open}${(selector.table ?? "t").replaceAll(close, close + close)}${close}`,
+      );
+      expect(commandComposerViolations(escaping)).toEqual([]);
+    }
+  });
+
+  test("reads a name with the grammar it is given, so brackets an engine reads as a subscript quote nothing", () => {
+    const bracketing = composingAll(
+      (selector) => `SHOW COLUMNS FROM [${(selector.table ?? "t").replaceAll("]", "]]")}]`,
+    );
+    const subscripting: SqlGrammar = { ...DEFAULT_SQL_GRAMMAR, bracket: "subscript" };
+    expect(commandComposerViolations(bracketing, [DEFAULT_SQL_GRAMMAR])).toEqual([]);
+    expect(commandComposerViolations(bracketing, [DEFAULT_SQL_GRAMMAR, subscripting])).toContain(
+      `columns {"kind":"columns","table":"${SENTINEL_NAME}"}: a name it does not quote`,
+    );
+  });
+});
+
+test("the command catalog reads name only engines that speak a language", () => {
+  for (const type of COMMAND_CATALOG_READS) expect(ENGINES).toContain(type);
+});
 
 /** Inputs no adapter may throw on: a statement, the empty one, and every non-string a ledger or a model can send. */
 const ADAPTER_CORPUS: readonly unknown[] = ["", "SELECT 1", {}, { a: 1 }, null, 42, []];
@@ -69,6 +372,14 @@ test("the engines are every type with a statement language, and the execution en
   // A subset only. A type may speak a language and execute nothing; the two lists are not the same claim.
   for (const type of AGENT_EXECUTION_ENGINES) expect(ENGINES).toContain(type);
 });
+
+test.each([...AGENT_EXECUTION_ENGINES])(
+  "%s opens a workflow that sends a statement, so agent mode executing there is true",
+  (type) => {
+    const sending = openVariants(type).filter(({ workflow }) => AGENT_WORKFLOW_SENDS_STATEMENTS[workflow]);
+    expect(sending.length).toBeGreaterThan(0);
+  },
+);
 
 test("the unserved offers name only engines that speak a language", () => {
   for (const type of Object.keys(UNSERVED_OFFERS)) expect(ENGINES).toContain(type as DatabaseType);
@@ -129,6 +440,25 @@ describe.each(ENGINES)("%s", (type) => {
       }
     }
     expect([...unserved].sort()).toEqual([...(UNSERVED_OFFERS[type] ?? [])].sort());
+  });
+
+  test("declares a catalog row mapper exactly where it is listed, and that mapper holds the contract", () => {
+    const catalogRead = pack.server.dialect?.catalogRead;
+    const mapRows = catalogRead === undefined || catalogRead === "unsupported" ? undefined : catalogRead.mapRows;
+    expect(mapRows !== undefined).toBe(MAPPED_CATALOG_READS.includes(type));
+    if (mapRows !== undefined) expect(catalogMapperViolations(mapRows)).toEqual([]);
+  });
+
+  test("declares its catalog read a command exactly where it is listed, and its composers hold the contract", () => {
+    const catalogRead = pack.server.dialect?.catalogRead;
+    const commandShaped =
+      catalogRead !== undefined && catalogRead !== "unsupported" && catalogRead.commandShaped === true;
+    expect(commandShaped).toBe(COMMAND_CATALOG_READS.includes(type));
+    if (commandShaped) {
+      expect(commandComposerViolations(catalogRead.compose, [DEFAULT_SQL_GRAMMAR, resolveSqlGrammar(type)])).toEqual(
+        [],
+      );
+    }
   });
 
   test("its adapter is total over the corpus", () => {
